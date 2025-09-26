@@ -5,7 +5,7 @@ import odoorpc
 import ssl
 import sys
 import time
-import urllib2
+import urllib.request
 from collections import OrderedDict, defaultdict
 from pprint import pprint
 
@@ -43,7 +43,7 @@ class OdooInstance():
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            opener = urllib2.build_opener(urllib2.HTTPSHandler(context=ctx))
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
             protocol = 'jsonrpc+ssl'
 
         self.host = odoo_instance.get('host')
@@ -192,7 +192,7 @@ class OdooModel():
 
     def _map_fields(self, data, find_dest_id_function):
         mapped = data.copy()
-        for field, rel_model_name in self.many2onefields.iteritems():
+        for field, rel_model_name in self.many2onefields.items():
             source_id = data.get(field) and data.get(field)[0]
             if source_id:
                 dest_id = find_dest_id_function(rel_model_name, source_id)
@@ -207,7 +207,7 @@ class OdooModel():
 class ModelSyncer():
     """ Syncer instance """ 
 
-    def __init__(self, _struct, _timestamps):
+    def __init__(self, _struct, _timestamps, options={}):
         self.options = _struct.get('options', {})
         self.dry_run = self.options.get('dry_run')
         self.debug = self.options.get('debug')
@@ -268,7 +268,7 @@ class ModelSyncer():
         """ Create translation tables for source record id -> dest record id
             loaded is a {model.name -> [ids]} dict, to translate."""
         xmlids = []
-        for model_name, _ids in loaded.iteritems():
+        for model_name, _ids in loaded.items():
             for source_id in list(_ids):
                 xmlids.append(self._get_xmlid(model_name, source_id))
         dest_external_ids = self.dest.ir_model_obj.search([
@@ -291,7 +291,7 @@ class ModelSyncer():
         """ Create translation tables for dest record id -> source record id
             loaded is a {model.name -> [ids]} dict, to translate."""
         dest_external_ids = []
-        for model_name, _ids in loaded.iteritems():
+        for model_name, _ids in loaded.items():
             # TODO: this may be a very slow search, and there are several
             # for each model. An optimization could be to query the source
             # server, and to store the reverse xmlids also there.
@@ -373,14 +373,14 @@ class ModelSyncer():
 
     def _make_hash(self, vals):
         _hash = hashlib.md5()
-        for k, v in sorted(vals.iteritems()):
+        for k, v in sorted(vals.items()):
             if k == 'id':
                 continue
             if isinstance(v, (list, tuple)):
                 v = v[0]
             if not v:
                 v = '___None'
-            _hash.update(unicode(v).encode('utf-8'))
+            _hash.update(str(v).encode('utf-8'))
         return _hash.hexdigest()
 
     def _write_or_create_model_record(
@@ -517,33 +517,23 @@ class ModelSyncer():
                 logger.error('Writing {}[{}] failed: {}'.format(
                     model.name, dest_id, str(e)))
                 # TODO: How to deal with this
-
-        #self._write_or_create_model_record(
-        #    odoo,
-        #    model,
-        #    mapped,
-        #    source_id, 
-        #    find_dest_id_function,
-        #    add_dest_id_function,
-        #    create_xmlid_function,
-        #    translate_function,
-        #    noupdate=noupdate)
+                
 
     def _load_dependencies_of_records(self, odoo, loaded, other_models,
             add_translations):
         """ loaded: dict of {'model.name' -> records} 
             the records, as well as the othermodels[*].records
             can be considered as those that should surely be loaded """
-        count = sum(len(recs) for m, recs in loaded.iteritems())
+        count = sum(len(recs) for m, recs in loaded.items())
         if not count:
             return
         logger.info(u'Find dependencies for {} records...'.format(count))
         dep_struct = defaultdict(set)
         ignore_struct = defaultdict(set)
-        for model_name, records in loaded.iteritems():
+        for model_name, records in loaded.items():
             model = other_models[model_name]
             for record in records:
-                for field, rel_model_name in model.many2onefields.iteritems():
+                for field, rel_model_name in model.many2onefields.items():
                     _id = record.get(field) and record.get(field)[0]
                     rel_model = other_models.get(rel_model_name)
                     if not rel_model:
@@ -558,14 +548,14 @@ class ModelSyncer():
                         dep_struct[rel_model_name].add(_id)
         _loaded = {}
         add_translations(dep_struct)
-        for _model_name, _ids in dep_struct.iteritems():
+        for _model_name, _ids in dep_struct.items():
             _model = other_models[_model_name]
             ids_to_load = _ids - _model.translatable_ids
             recs = _model.load_recs(odoo, list(ids_to_load), dep=True)
             _loaded[_model_name] = recs
         self._load_dependencies_of_records(odoo, _loaded, other_models,
             add_translations)
-        for _model_name, _ids in ignore_struct.iteritems():
+        for _model_name, _ids in ignore_struct.items():
             logger.debug('Ignoring {}{}'.format(_model_name, str(_ids)))
 
     def prepare(self):
@@ -585,6 +575,24 @@ class ModelSyncer():
                 models_by_name, add_translations in syncs:
             logger.info("-----------PREPARE {}SYNC"
                 "----------".format("REVERSE " if reverse else ""))
+            
+            if self.options.get('sync_modules') and not reverse:
+                logger.info("Syncing modules...")
+                source_module = odoo.env['ir.module.module']
+                dest_module = dest_odoo.env['ir.module.module']
+                source_module_ids = source_module.search([('state', '=', 'installed')])
+                source_module_names = source_module.read(source_module_ids, ['name'])
+                source_module_names = [r['name'] for r in source_module_names]
+                dest_modules_ids = dest_module.search([('state', '!=', 'installed'), ('name', 'in', source_module_names)])
+                dest_modules = dest_module.browse(dest_modules_ids)
+                logger.info("Installing in dest modules {}...".format( [r['name'] for r in dest_modules.read(["name"])] ))
+                try:
+                    if not self.dry_run:
+                        dest_modules.button_immediate_install()
+                except odoorpc.error.RPCError as e:
+                    logger.error('Module installation failed: {}'.format(str(e)))
+                    raise e
+                        
             # Determine field names
             for model in models:
                 logger.info("Determine fields for model {}...".format(model.name))
