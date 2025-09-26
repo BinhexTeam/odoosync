@@ -9,8 +9,8 @@ from odoosync.ModelSyncer import ModelSyncer, SyncException
 
 
 def helptext(host):
-    print "In your $HOME/.netrc file place:"
-    print "machine odoo.example.com login myuser password mypassword"
+    print ("In your $HOME/.netrc file place:")
+    print ("machine odoo.example.com login myuser password mypassword")
     sys.exit(0)
 
 
@@ -21,14 +21,14 @@ args = parser.parse_args()
 yamlfile = args.yamlfile
 _struct = {}
 with open(yamlfile, 'r') as _file:
-    _struct = yaml.load(_file)
+    _struct = yaml.load(_file, Loader=yaml.SafeLoader)
 
 # Open timestamp file
 timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'
 _timestamps = {}
 try:
     with open(timestampfile, 'r') as _file:
-        _timestamps = yaml.load(_file)
+        _timestamps = yaml.load(_file, Loader=yaml.SafeLoader)
 except IOError:
     pass
 
