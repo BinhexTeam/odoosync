@@ -140,9 +140,17 @@ class OdooModel():
             if dep:
                 for record in records:
                     record.update({'__sfit_dep': True})
-            self.records.extend(records)
-            loaded.extend(records)
-            self.record_ids.update(set(r['id'] for r in records))
+            new_records = []
+            for record in records:
+                record_id = record.get('id')
+                if record_id in self.record_ids:
+                    logger.debug("Skipping duplicate %s[%s] already loaded", self.name, record_id)
+                    continue
+                new_records.append(record)
+                self.record_ids.add(record_id)
+            if new_records:
+                self.records.extend(new_records)
+                loaded.extend(new_records)
         return loaded
 
     def sort_parents_before_children(self):
