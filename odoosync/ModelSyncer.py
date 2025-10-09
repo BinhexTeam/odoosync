@@ -116,6 +116,7 @@ class OdooModel():
     def __init__(self, model_dict):
         self.fields = []
         self.many2onefields = {}
+        self.external_relation_fields = set()
         self.records = []
         self.record_ids = set()
         self.name = model_dict.get('model')
@@ -181,7 +182,8 @@ class OdooModel():
             sorted_records = records
         self.records = sorted_records
 
-    def determine_fields(self, odoo, dest_odoo, other_models, mapping):
+    def determine_fields(self, odoo, dest_odoo, other_models, mapping,
+        allow_external_m2o=False):
         """ Determine which field to sync for this model """
         logger.debug("Determining which fields to sync for {}".format(self.name))
         source_ir_fields = odoo.env['ir.model.fields']
@@ -215,10 +217,13 @@ class OdooModel():
                 continue
             if relation and ttype == 'many2one':
                 # Skip many2one fields with a relation that we
-                # are not including in this sync
-                if relation not in other_model_names:
+                # are not including in this sync unless we are
+                # allowed to resolve them externally (eg by xmlid)
+                if relation not in other_model_names and not allow_external_m2o:
                     continue
                 self.many2onefields[name] = relation
+                if relation not in other_model_names and allow_external_m2o:
+                    self.external_relation_fields.add(name)
             self.fields.append(name)
         logger.debug("{}".format(self.fields))
 
@@ -250,6 +255,7 @@ class ModelSyncer():
         self.debug = self.options.get('debug')
         self.sync_dependencies = bool(self.options.get('sync_dependencies'))
         
+        self.auto_xmlid_lookup = bool(self.options.get('auto_xmlid_lookup', True))
         if self.debug:
             logger.setLevel(logging.DEBUG)
             ch.setLevel(logging.DEBUG)
@@ -281,6 +287,9 @@ class ModelSyncer():
         timeout = self.options.get('timeout', 600)
         self.source.odoo.config['timeout'] = timeout
         self.dest.odoo.config['timeout'] = timeout
+        self._source_xmlid_cache = defaultdict(dict)
+        self._dest_xmlid_cache = defaultdict(dict)
+        self._external_translations = defaultdict(dict)
 
     def _get_xmlid(self, model_name, _id):
         return u'{}_{}'.format(model_name.replace('.', '_'), _id)
@@ -384,8 +393,19 @@ class ModelSyncer():
     def _find_dest_id(self, model_name, source_id):
         model = self.models_by_name.get(model_name)
         dest_id = self.manual_mapping.get(model_name, {}).get(source_id)
+        if not dest_id and model:
+            dest_id = source_id and model.trans.get(source_id)
         if not dest_id:
-            dest_id = source_id and model and model.trans.get(source_id)
+            dest_id = self._external_translations.get(model_name, {}).get(source_id)
+        if not dest_id and self.auto_xmlid_lookup and source_id:
+            xmlid = self._lookup_source_xmlid(model_name, source_id)
+            if xmlid:
+                dest_id = self._lookup_dest_by_xmlid(model_name, xmlid)
+                if dest_id:
+                    if model:
+                        model.trans[source_id] = dest_id
+                        model.translatable_ids.add(source_id)
+                    self._external_translations[model_name][source_id] = dest_id
         logger.debug("source {}[{}] -> dest {}[{}]".format(
             model_name, source_id, model and model.name, dest_id))
         return dest_id
@@ -411,6 +431,56 @@ class ModelSyncer():
         if model:
             model.trans[dest_id] = source_id
             model.translatable_ids.add(dest_id)
+
+    def _lookup_source_xmlid(self, model_name, source_id):
+        cache = self._source_xmlid_cache[model_name]
+        if source_id in cache:
+            return cache[source_id]
+        try:
+            ir_model_data = self.source.odoo.env['ir.model.data']
+        except (AttributeError, KeyError):
+            cache[source_id] = None
+            return None
+        record_ids = ir_model_data.search([
+            ('model', '=', model_name),
+            ('res_id', '=', source_id)
+        ])
+        xmlid = None
+        if record_ids:
+            data = ir_model_data.read(record_ids[:1], ['module', 'name'])
+            if data:
+                module = data[0].get('module')
+                name = data[0].get('name')
+                if module and name:
+                    xmlid = '{}.{}'.format(module, name)
+        cache[source_id] = xmlid
+        return xmlid
+
+    def _lookup_dest_by_xmlid(self, model_name, xmlid):
+        if not xmlid or '.' not in xmlid:
+            return None
+        module, name = xmlid.split('.', 1)
+        cache = self._dest_xmlid_cache[model_name]
+        key = (module, name)
+        if key in cache:
+            return cache[key]
+        try:
+            ir_model_data = self.dest.ir_model_obj
+        except AttributeError:
+            cache[key] = None
+            return None
+        record_ids = ir_model_data.search([
+            ('module', '=', module),
+            ('name', '=', name),
+            ('model', '=', model_name)
+        ])
+        dest_id = None
+        if record_ids:
+            data = ir_model_data.read(record_ids[:1], ['res_id'])
+            if data:
+                dest_id = data[0].get('res_id')
+        cache[key] = dest_id
+        return dest_id
 
     def _make_hash(self, vals):
         _hash = hashlib.md5()
@@ -505,17 +575,28 @@ class ModelSyncer():
                 logger.debug('Skipping dependency record %s[%s] (sync_dependencies disabled)',
                              model.name, record.get('id'))
                 continue
-            if bool(record.get('__sfit_dep')) \
-                    or not source_id in model.translatable_ids:
+            dest_id = find_dest_id_function(model.name, source_id)
+            if dest_id:
+                mapped = model._map_fields(
+                    record,
+                    find_dest_id_function)
+                dest_ids.append(dest_id)
+                _hash = self._make_hash(mapped)
+                to_update[dest_id] = (source_id, _hash, mapped)
+                continue
+            if bool(record.get('__sfit_dep')) or source_id not in model.translatable_ids:
                 to_create.append((source_id, record))
             else:
                 mapped = model._map_fields(
                     record,
                     find_dest_id_function)
                 dest_id = find_dest_id_function(model.name, source_id)
-                dest_ids.append(dest_id)
-                _hash = self._make_hash(mapped)
-                to_update[dest_id] = (source_id, _hash, mapped)
+                if dest_id:
+                    dest_ids.append(dest_id)
+                    _hash = self._make_hash(mapped)
+                    to_update[dest_id] = (source_id, _hash, mapped)
+                else:
+                    to_create.append((source_id, record))
 
         # Create records
         if to_create:
@@ -670,7 +751,12 @@ class ModelSyncer():
             # Determine field names
             for model in models:
                 logger.info("Determine fields for model {}...".format(model.name))
-                model.determine_fields(odoo, dest_odoo, models, mapping)
+                model.determine_fields(
+                    odoo,
+                    dest_odoo,
+                    models,
+                    mapping,
+                    allow_external_m2o=self.auto_xmlid_lookup)
 
             # Load records
             for model in models:

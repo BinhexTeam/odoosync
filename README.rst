@@ -16,6 +16,7 @@ Main features:
 * Follow many2one relations to sync dependent records
 * Manual mapping table (id - id) for records that cannot be synced
   (eg. for company ids, country records, analytic account ids...)
+* Automatically reuse destination records that share XML IDs with source data
 * Correctly sync recursive parent_id relations
 * Exclude certain fields from sync
 * Include only certain fields in sync
@@ -89,6 +90,11 @@ From command line::
 Provide a one-off credentials file with::
 
   odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc
+
+Automatic reuse of records by XML ID is enabled by default. Set
+``options.auto_xmlid_lookup`` to ``false`` in the YAML file if you prefer to
+force manual mappings for module-provided data instead of relying on shared
+external identifiers.
 
 From other Python scripts::
 

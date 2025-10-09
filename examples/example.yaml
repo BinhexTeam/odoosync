@@ -19,6 +19,7 @@ options:
   prefix: '__export_sfit__'  # Use a custom prefix for xmlids
   dry_run: False  # Run, but dont write to target database
   debug: True     # Show debug messages
+  auto_xmlid_lookup: True  # Reuse records that share xmlids on the target
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
   # sync_dependencies: true  # Optional: create related records outside the domain selection
 
