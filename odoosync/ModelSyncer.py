@@ -512,7 +512,29 @@ class ModelSyncer():
         # Create records
         if to_create:
             logger.info('{} records to create'.format(len(to_create)))
-        for source_id, record in to_create:
+        pending_create = dict((sid, rec) for sid, rec in to_create)
+        created_sources = set()
+        creating_stack = set()
+
+        def _create_source_record(source_id):
+            if source_id in created_sources:
+                return
+            record = pending_create.get(source_id)
+            if not record:
+                return
+            if source_id in creating_stack:
+                logger.warning('Circular dependency detected for %s[%s]',
+                               model.name, source_id)
+                return
+            creating_stack.add(source_id)
+            for field, rel_model_name in model.many2onefields.items():
+                if rel_model_name != model.name:
+                    continue
+                rel_value = record.get(field)
+                rel_source_id = rel_value and rel_value[0]
+                if rel_source_id and rel_source_id in pending_create:
+                    _create_source_record(rel_source_id)
+
             logger.info(u'creating record from source {}[{}]..'.format(
                 model.name, source_id))
             mapped = model._map_fields(
@@ -528,6 +550,12 @@ class ModelSyncer():
                     logger.error('Creating {} failed: {}'.format(
                         model.name, str(e)))
                     # TODO: How to deal with this
+            creating_stack.remove(source_id)
+            created_sources.add(source_id)
+            pending_create.pop(source_id, None)
+
+        for source_id, _ in to_create:
+            _create_source_record(source_id)
 
         really_update = []
         if dest_ids:
