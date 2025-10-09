@@ -18,6 +18,8 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Sync data between Odoo instances")
     parser.add_argument('yamlfile', help='Configuration file describing the sync job')
     parser.add_argument('--netrc-file', dest='netrc_file', help='Override the netrc file path used for authentication')
+    parser.add_argument('--sync-dependencies', action='store_true',
+                        help='Also create related records discovered as dependencies')
     return parser
 
 
@@ -33,6 +35,9 @@ def main(argv=None):
     if args.netrc_file:
         options = _struct.setdefault('options', {})
         options['netrc_path'] = args.netrc_file
+    if args.sync_dependencies:
+        options = _struct.setdefault('options', {})
+        options['sync_dependencies'] = True
 
     # Open timestamp file
     timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'

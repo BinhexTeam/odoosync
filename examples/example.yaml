@@ -20,6 +20,7 @@ options:
   dry_run: False  # Run, but dont write to target database
   debug: True     # Show debug messages
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
+  # sync_dependencies: true  # Optional: create related records outside the domain selection
 
 models:
 

@@ -126,8 +126,14 @@ Credits
 Contributors
 ------------    
 
+    
+Use a custom netrc file or include dependent records::
+
+  odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc --sync-dependencies
 * Hayyan Ebrahem
 * Tom Blauwendraat
+
+Set ``options.sync_dependencies`` to ``true`` (or pass ``--sync-dependencies`` on the CLI) to create related records discovered while resolving many2one relationships.
 
 Maintainer
 ----------

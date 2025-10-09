@@ -19,6 +19,8 @@ logger.addHandler(ch)
 logger.setLevel(logging.INFO)
 ch.setLevel(logging.INFO)
 
+INTERNAL_RUNTIME_FIELDS = ('__sfit_dep',)
+
 
 DEFAULT_EXCLUDED_FIELDS = [
     'id',
@@ -213,7 +215,12 @@ class OdooModel():
         logger.debug("{}".format(self.fields))
 
     def _map_fields(self, data, find_dest_id_function):
-        mapped = data.copy()
+        mapped = {
+            key: value for key, value in data.items()
+            if key not in INTERNAL_RUNTIME_FIELDS
+        }
+        for internal_key in INTERNAL_RUNTIME_FIELDS:
+            mapped.pop(internal_key, None)
         for field, rel_model_name in self.many2onefields.items():
             source_id = data.get(field) and data.get(field)[0]
             if source_id:
@@ -233,6 +240,7 @@ class ModelSyncer():
         self.options = _struct.get('options', {})
         self.dry_run = self.options.get('dry_run')
         self.debug = self.options.get('debug')
+        self.sync_dependencies = bool(self.options.get('sync_dependencies'))
         
         if self.debug:
             logger.setLevel(logging.DEBUG)
@@ -398,7 +406,8 @@ class ModelSyncer():
 
     def _make_hash(self, vals):
         _hash = hashlib.md5()
-        for k, v in sorted(vals.items()):
+        for k, v in sorted((k, v) for k, v in vals.items()
+                            if k not in INTERNAL_RUNTIME_FIELDS):
             if k == 'id':
                 continue
             if isinstance(v, (list, tuple)):
@@ -484,6 +493,10 @@ class ModelSyncer():
         new_hashes = {}
         for record in model.records:
             source_id = record['id']
+            if bool(record.get('__sfit_dep')) and not self.sync_dependencies:
+                logger.debug('Skipping dependency record %s[%s] (sync_dependencies disabled)',
+                             model.name, record.get('id'))
+                continue
             if bool(record.get('__sfit_dep')) \
                     or not source_id in model.translatable_ids:
                 to_create.append((source_id, record))
@@ -641,9 +654,10 @@ class ModelSyncer():
             add_translations(trans)
 
             # Determine and load dependencies
-            loaded = dict((m.name, m.records) for m in models)
-            self._load_dependencies_of_records(odoo, loaded, 
-                models_by_name, add_translations)
+            if self.sync_dependencies:
+                loaded = dict((m.name, m.records) for m in models)
+                self._load_dependencies_of_records(odoo, loaded, 
+                    models_by_name, add_translations)
 
             # Sort loaded records so that parents always come before children
             for model in models:
