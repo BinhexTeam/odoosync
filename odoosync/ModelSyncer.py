@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import netrc
+import os
 import odoorpc
 import ssl
 import sys
@@ -35,7 +36,7 @@ class SyncException(Exception):
 class OdooInstance():
     """ Abstraction of an Odoo Instance """
 
-    def __init__(self, odoo_instance):
+    def __init__(self, odoo_instance, default_netrc_path=None):
         opener = False
         protocol = 'jsonrpc'
 
@@ -49,6 +50,10 @@ class OdooInstance():
         self.host = odoo_instance.get('host')
         self.port = odoo_instance.get('port')
         self.database = odoo_instance.get('database')
+        self.netrc_path = self._select_netrc_path(
+            odoo_instance.get('netrc_path'),
+            default_netrc_path
+        )
         self.odoo = odoorpc.ODOO(
             self.host,
             port=self.port,
@@ -59,11 +64,28 @@ class OdooInstance():
         self.ir_model_obj = self.odoo.env['ir.model.data']
         self._get_timestamp()
 
+    def _select_netrc_path(self, instance_path, default_netrc_path):
+        candidates = [
+            instance_path,
+            default_netrc_path,
+            os.environ.get('ODOOSYNC_NETRC'),
+            os.environ.get('NETRC'),
+        ]
+        for candidate in candidates:
+            if candidate:
+                return os.path.expanduser(candidate)
+        return None
+
     def _login(self):
         # get login details from netRC file
         try:
-            netrc_info = netrc.netrc()
-        except IOError:
+            if self.netrc_path:
+                logger.debug("Loading credentials from netrc file %s", self.netrc_path)
+                netrc_info = netrc.netrc(self.netrc_path)
+            else:
+                netrc_info = netrc.netrc()
+        except (IOError, FileNotFoundError) as exc:
+            logger.error("Failed to load netrc credentials for host %s: %s", self.host, exc)
             raise SyncException(self.host)
         auth_info = netrc_info.authenticators(self.host)
         if not auth_info:
@@ -222,8 +244,11 @@ class ModelSyncer():
             _struct.get('reverse_manual_mapping', {})
         self.source_timestamp = _timestamps.get('source')
         self.dest_timestamp = _timestamps.get('target')
-        self.source = OdooInstance(_struct.get('source', {}))
-        self.dest = OdooInstance(_struct.get('target', {}))
+        default_netrc_path = self.options.get('netrc_path')
+        source_netrc_path = self.options.get('source_netrc_path', default_netrc_path)
+        target_netrc_path = self.options.get('target_netrc_path', default_netrc_path)
+        self.source = OdooInstance(_struct.get('source', {}), source_netrc_path)
+        self.dest = OdooInstance(_struct.get('target', {}), target_netrc_path)
         self.source_ir_fields = self.source.odoo.env['ir.model.fields']
         self.models = [
             OdooModel(m) for m in _struct.get('models', {})

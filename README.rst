@@ -59,6 +59,23 @@ To specify login and password, put this in `$HOME/.netrc`::
     machine source.domain.tld login me@sunflowerweb.nl password mypassword
     machine destination.domain.tld login me@sunflowerweb.nl password mypassword
 
+If your credentials live in another location, set a custom path either in the YAML file::
+
+    source:
+      host: source.domain.tld
+      netrc_path: /etc/odoo/source.netrc
+
+    target:
+      host: destination.domain.tld
+      netrc_path: /etc/odoo/destination.netrc
+
+or globally for all endpoints::
+
+    options:
+      netrc_path: /etc/odoo/shared.netrc
+
+The path accepts ``~`` expansion. The environment variables ``ODOOSYNC_NETRC`` and ``NETRC`` are also honoured as fallbacks.
+
 To specify which models to sync, create a YAML file.
 Please see the `YAML examples <https://github.com/sunflowerit/odoosync/blob/master/examples>`_.
 
@@ -68,6 +85,10 @@ Usage
 From command line::
 
     odoosync mysyncfile.yaml
+
+Provide a one-off credentials file with::
+
+  odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc
 
 From other Python scripts::
 

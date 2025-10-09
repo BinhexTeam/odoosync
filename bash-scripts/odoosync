@@ -9,38 +9,53 @@ from odoosync.ModelSyncer import ModelSyncer, SyncException
 
 
 def helptext(host):
-    print ("In your $HOME/.netrc file place:")
-    print ("machine odoo.example.com login myuser password mypassword")
+    print("In your $HOME/.netrc file place:")
+    print("machine odoo.example.com login myuser password mypassword")
     sys.exit(0)
 
 
-# Open YAML file
-parser = argparse.ArgumentParser()
-parser.add_argument('yamlfile')
-args = parser.parse_args()
-yamlfile = args.yamlfile
-_struct = {}
-with open(yamlfile, 'r') as _file:
-    _struct = yaml.load(_file, Loader=yaml.SafeLoader)
+def build_parser():
+    parser = argparse.ArgumentParser(description="Sync data between Odoo instances")
+    parser.add_argument('yamlfile', help='Configuration file describing the sync job')
+    parser.add_argument('--netrc-file', dest='netrc_file', help='Override the netrc file path used for authentication')
+    return parser
 
-# Open timestamp file
-timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'
-_timestamps = {}
-try:
-    with open(timestampfile, 'r') as _file:
-        _timestamps = yaml.load(_file, Loader=yaml.SafeLoader)
-except IOError:
-    pass
 
-# Sync
-try:
-    instance = ModelSyncer(_struct, _timestamps)
-except SyncException as e:
-    helptext(e.args[0])
-instance.prepare()
-instance.sync()
-_timestamps = instance.get_new_timestamps()
-if _timestamps:
-    with open(timestampfile, 'w') as _file:
-        yaml.dump(_timestamps, _file)
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    yamlfile = args.yamlfile
+    _struct = {}
+
+    with open(yamlfile, 'r') as _file:
+        _struct = yaml.load(_file, Loader=yaml.SafeLoader)
+
+    if args.netrc_file:
+        options = _struct.setdefault('options', {})
+        options['netrc_path'] = args.netrc_file
+
+    # Open timestamp file
+    timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'
+    _timestamps = {}
+    try:
+        with open(timestampfile, 'r') as _file:
+            _timestamps = yaml.load(_file, Loader=yaml.SafeLoader)
+    except IOError:
+        pass
+
+    # Sync
+    try:
+        instance = ModelSyncer(_struct, _timestamps)
+    except SyncException as e:
+        helptext(e.args[0])
+    instance.prepare()
+    instance.sync()
+    _timestamps = instance.get_new_timestamps()
+    if _timestamps:
+        with open(timestampfile, 'w') as _file:
+            yaml.dump(_timestamps, _file)
+
+
+if __name__ == "__main__":
+    main()
 

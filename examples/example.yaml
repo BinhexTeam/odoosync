@@ -3,11 +3,13 @@ source:
   port: 443
   database: example1
   ssl: yes  # use HTTPS
+  # netrc_path: /etc/odoo/source.netrc  # Optional: path to credentials file
 
 target:
   host: localhost
   port: 8069
   database: test
+  # netrc_path: /etc/odoo/target.netrc  # Optional: path to credentials file
 
 manual_mapping:
   res.company:
@@ -17,6 +19,7 @@ options:
   prefix: '__export_sfit__'  # Use a custom prefix for xmlids
   dry_run: False  # Run, but dont write to target database
   debug: True     # Show debug messages
+  # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
 
 models:
 
