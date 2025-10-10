@@ -16,6 +16,7 @@ Main features:
 * Follow many2one relations to sync dependent records
 * Manual mapping table (id - id) for records that cannot be synced
   (eg. for company ids, country records, analytic account ids...)
+* Field-to-field mapping with automatic type conversion when possible
 * Automatically reuse destination records that share XML IDs with source data
 * Correctly sync recursive parent_id relations
 * Exclude certain fields from sync
@@ -95,6 +96,18 @@ Automatic reuse of records by XML ID is enabled by default. Set
 ``options.auto_xmlid_lookup`` to ``false`` in the YAML file if you prefer to
 force manual mappings for module-provided data instead of relying on shared
 external identifiers.
+
+To remap fields between source and destination models, add a ``field_mapping``
+section inside the model definition in your YAML file::
+
+  - model: res.partner
+    field_mapping:
+      x_field: y_field
+
+odoosync copies values from ``x_field`` into ``y_field`` and attempts safe
+conversions (booleans to integers, integers to floats, many2one relations to
+text, and more). When a conversion is not supported, the mapping is skipped and
+a warning is logged so the record continues untouched.
 
 From other Python scripts::
 

@@ -28,6 +28,8 @@ models:
 # Partner records: sync only customers belonging to our company 2
 - model: res.partner
   domain: [['customers', '=', True], ['company_id', '=', 2]]
+  field_mapping:
+    x_field: y_field  # Optional: rename source field to destination field
   excluded_fields:
   - signup_url  # exclude a field, sync all others
   context: {'active_test': False}  # Sync inactive partners too

@@ -117,6 +117,9 @@ class OdooModel():
         self.fields = []
         self.many2onefields = {}
         self.external_relation_fields = set()
+        self.field_mapping = dict(model_dict.get('field_mapping', {}) or {})
+        self.dest_fields = []
+        self.field_specs = {}
         self.records = []
         self.record_ids = set()
         self.name = model_dict.get('model')
@@ -191,30 +194,56 @@ class OdooModel():
         fields_domain = [('model', '=', self.name)]
         if self.included_fields:
             fields_domain.append(('name', 'in', list(self.included_fields)))
+
+        # Reset field bookkeeping for repeated prepare() calls
+        self.fields = []
+        self.dest_fields = []
+        self.many2onefields = {}
+        self.external_relation_fields = set()
+        self.field_specs = {}
+
         field_ids = source_ir_fields.search(fields_domain)
         fields = source_ir_fields.read(field_ids, [])
-        dest_field_ids = dest_ir_fields.search(fields_domain)
-        dest_fields = dest_ir_fields.read(dest_field_ids, ['name'])
-        dest_field_names = [r['name'] for r in dest_fields]
+
+        dest_fields_domain = [('model', '=', self.name)]
+        dest_field_ids = dest_ir_fields.search(dest_fields_domain)
+        dest_fields = dest_ir_fields.read(dest_field_ids, ['name', 'ttype', 'relation'])
+        dest_field_by_name = dict((r['name'], r) for r in dest_fields)
+        dest_field_names = set(dest_field_by_name.keys())
+
         other_model_names = set([m.name for m in other_models])
         other_model_names = set(mapping.keys()).union(other_model_names)
+
         for field in fields:
             name = field.get('name')
             relation = field.get('relation')
             ttype = field.get('ttype')
             readonly = field.get('readonly')
+
             # Skip computed fields
             if readonly:
                 continue
             # Skip excluded fields, one2many fields, many2many fields
-            if name in self.excluded_fields or (relation and ttype != 'many2one'):
+            if name in self.excluded_fields:
                 continue
-            # Skip fields that dont exist on dest
-            if name not in dest_field_names:
-                logger.warning("Field {}[{}] does not exist on "
-                    "destination, consider mapping to "
-                    "another field".format(self.name, name))
+            if relation and ttype not in ('many2one',) and name not in self.field_mapping:
                 continue
+
+            target_name = self.field_mapping.get(name, name)
+
+            if target_name not in dest_field_names:
+                if target_name != name:
+                    logger.warning(
+                        "Field mapping %s[%s] -> %s skipped: destination field missing",
+                        self.name, name, target_name)
+                else:
+                    logger.warning("Field {}[{}] does not exist on destination, consider mapping to another field".format(self.name, name))
+                continue
+
+            dest_field_info = dest_field_by_name[target_name]
+            dest_ttype = dest_field_info.get('ttype')
+            dest_relation = dest_field_info.get('relation')
+
             if relation and ttype == 'many2one':
                 # Skip many2one fields with a relation that we
                 # are not including in this sync unless we are
@@ -224,26 +253,164 @@ class OdooModel():
                 self.many2onefields[name] = relation
                 if relation not in other_model_names and allow_external_m2o:
                     self.external_relation_fields.add(name)
+
             self.fields.append(name)
-        logger.debug("{}".format(self.fields))
+            if target_name not in self.dest_fields:
+                self.dest_fields.append(target_name)
+            self.field_specs[name] = {
+                'dest_field': target_name,
+                'source_type': ttype,
+                'source_relation': relation,
+                'dest_type': dest_ttype,
+                'dest_relation': dest_relation,
+            }
+
+        if 'id' not in self.fields:
+            self.fields.append('id')
+        if 'id' not in self.dest_fields:
+            self.dest_fields.insert(0, 'id')
+        logger.debug("Source fields: %s", self.fields)
+        logger.debug("Destination fields: %s", self.dest_fields)
 
     def _map_fields(self, data, find_dest_id_function):
-        mapped = {
-            key: value for key, value in data.items()
-            if key not in INTERNAL_RUNTIME_FIELDS
-        }
-        for internal_key in INTERNAL_RUNTIME_FIELDS:
-            mapped.pop(internal_key, None)
-        for field, rel_model_name in self.many2onefields.items():
-            source_id = data.get(field) and data.get(field)[0]
-            if source_id:
-                dest_id = find_dest_id_function(rel_model_name, source_id)
-                if not dest_id:
-                    logger.warning("Mapping failed: consider adding "
-                        "manual mapping for record {}[{}]".format(
-                        rel_model_name, source_id))
-                mapped[field] = dest_id or None
+        mapped = {}
+        for source_field in self.fields:
+            if source_field in INTERNAL_RUNTIME_FIELDS or source_field == 'id':
+                continue
+            if source_field not in data:
+                continue
+            if source_field.startswith('__sfit_'):
+                continue
+
+            spec = self.field_specs.get(source_field)
+            dest_field = spec.get('dest_field') if spec else source_field
+            value = data.get(source_field)
+
+            converted, ok, message = self._convert_field_value(
+                source_field,
+                dest_field,
+                spec,
+                value,
+                find_dest_id_function)
+
+            if ok:
+                if message:
+                    logger.warning(message)
+                mapped[dest_field] = converted
+            else:
+                logger.warning(
+                    "Skipping field mapping %s[%s] -> %s: %s",
+                    self.name,
+                    source_field,
+                    dest_field,
+                    message)
         return mapped
+
+    def _convert_field_value(self, source_field, dest_field, spec, value, find_dest_id_function):
+        if spec is None:
+            return value, True, None
+
+        source_type = spec.get('source_type')
+        dest_type = spec.get('dest_type')
+        source_relation = spec.get('source_relation')
+        dest_relation = spec.get('dest_relation')
+
+        if value in (None, False):
+            return None, True, None
+
+        if source_type == dest_type and dest_type != 'many2one':
+            return value, True, None
+
+        if dest_type == 'many2one':
+            if source_type != 'many2one':
+                return None, False, "cannot convert {} to many2one".format(source_type)
+            source_rel_id = None
+            if isinstance(value, (list, tuple)) and value:
+                source_rel_id = value[0]
+            elif isinstance(value, int):
+                source_rel_id = value
+            if not source_rel_id:
+                return None, True, None
+            rel_model = dest_relation or source_relation
+            if not rel_model:
+                return None, False, "missing relation metadata for many2one field"
+            dest_id = find_dest_id_function(rel_model, source_rel_id)
+            if not dest_id:
+                return None, True, "Mapping failed: consider adding manual mapping for record {}[{}]".format(rel_model, source_rel_id)
+            return dest_id, True, None
+
+        if source_type == 'many2one' and dest_type in {'char', 'text', 'html', 'selection'}:
+            if isinstance(value, (list, tuple)) and len(value) > 1:
+                return value[1], True, None
+            return None, True, None
+
+        if dest_type in {'char', 'text', 'html', 'selection'}:
+            if source_type in {'char', 'text', 'html', 'selection', 'date', 'datetime'}:
+                return str(value) if value is not None else None, True, None
+            if source_type in {'integer'}:
+                return str(int(value)), True, None
+            if source_type in {'float', 'monetary'}:
+                return str(float(value)), True, None
+            if source_type == 'boolean':
+                return 'True' if bool(value) else 'False', True, None
+            return None, False, "cannot convert {} to {}".format(source_type, dest_type)
+
+        if dest_type == 'boolean':
+            if source_type == 'boolean':
+                return bool(value), True, None
+            if source_type in {'integer', 'float', 'monetary'}:
+                return bool(value), True, None
+            if source_type in {'char', 'text', 'html', 'selection'}:
+                text = str(value).strip().lower()
+                if text in ('1', 'true', 't', 'yes', 'y'):
+                    return True, True, None
+                if text in ('0', 'false', 'f', 'no', 'n', ''):
+                    return False, True, None
+                return None, False, "cannot convert string '{}' to boolean".format(value)
+            return None, False, "cannot convert {} to boolean".format(source_type)
+
+        if dest_type == 'integer':
+            if source_type == 'integer':
+                return int(value), True, None
+            if source_type in {'float', 'monetary'}:
+                return int(value), True, None
+            if source_type == 'boolean':
+                return 1 if bool(value) else 0, True, None
+            if source_type in {'char', 'text', 'html', 'selection'}:
+                try:
+                    return int(float(str(value).strip() or 0)), True, None
+                except ValueError:
+                    return None, False, "cannot parse '{}' as integer".format(value)
+            return None, False, "cannot convert {} to integer".format(source_type)
+
+        if dest_type in {'float', 'monetary'}:
+            if source_type in {'float', 'monetary'}:
+                return float(value), True, None
+            if source_type == 'integer':
+                return float(value), True, None
+            if source_type == 'boolean':
+                return 1.0 if bool(value) else 0.0, True, None
+            if source_type in {'char', 'text', 'html', 'selection'}:
+                try:
+                    return float(str(value).strip()) if str(value).strip() else 0.0, True, None
+                except ValueError:
+                    return None, False, "cannot parse '{}' as float".format(value)
+            return None, False, "cannot convert {} to float".format(source_type)
+
+        if dest_type in {'date', 'datetime'}:
+            if source_type in {'date', 'datetime', 'char', 'text', 'html', 'selection'}:
+                return str(value), True, None
+            return None, False, "cannot convert {} to {}".format(source_type, dest_type)
+
+        if dest_type in {'one2many', 'many2many'}:
+            if source_type == dest_type:
+                return value, True, None
+            return None, False, "cannot convert {} to {}".format(source_type, dest_type)
+
+        if source_type == dest_type:
+            return value, True, None
+
+        return None, False, "cannot convert {} to {}".format(source_type, dest_type)
 
 
 class ModelSyncer():
@@ -519,7 +686,7 @@ class ModelSyncer():
         obj = odoo.odoo.env[model.name]
         if dest_id and not noupdate:
             # check if changed
-            old_vals = obj.read([dest_id], model.fields)[0]
+            old_vals = obj.read([dest_id], model.dest_fields)[0]
             if self._make_hash(old_vals) == self._make_hash(vals):
                 logger.info(u'no change: not updating {}[{}] from {}'.format(
                     model.name, dest_id, source_id))
@@ -651,7 +818,7 @@ class ModelSyncer():
             logger.info('{} records to update'.format(len(to_update)))
             logger.info('Checking hashes...')
             really_update = []
-            old_vals = obj.read(dest_ids, model.fields)
+            old_vals = obj.read(dest_ids, model.dest_fields)
             for vals in old_vals:
                 old_hash = self._make_hash(vals)
                 dest_id = vals['id']
