@@ -20,6 +20,8 @@ def build_parser():
     parser.add_argument('--netrc-file', dest='netrc_file', help='Override the netrc file path used for authentication')
     parser.add_argument('--sync-dependencies', action='store_true',
                         help='Also create related records discovered as dependencies')
+    parser.add_argument('--force-sync', action='store_true',
+                        help='Sync all records regardless of last modification date')
     return parser
 
 
@@ -32,12 +34,13 @@ def main(argv=None):
     with open(yamlfile, 'r') as _file:
         _struct = yaml.load(_file, Loader=yaml.SafeLoader)
 
+    options = _struct.setdefault('options', {})
     if args.netrc_file:
-        options = _struct.setdefault('options', {})
         options['netrc_path'] = args.netrc_file
     if args.sync_dependencies:
-        options = _struct.setdefault('options', {})
         options['sync_dependencies'] = True
+    if args.force_sync:
+        options['force_sync'] = True
 
     # Open timestamp file
     timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'

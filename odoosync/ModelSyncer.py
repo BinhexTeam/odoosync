@@ -421,6 +421,7 @@ class ModelSyncer():
         self.dry_run = self.options.get('dry_run')
         self.debug = self.options.get('debug')
         self.sync_dependencies = bool(self.options.get('sync_dependencies'))
+        self.force_sync = bool(self.options.get('force_sync'))
         
         self.auto_xmlid_lookup = bool(self.options.get('auto_xmlid_lookup', True))
         if self.debug:
@@ -880,6 +881,15 @@ class ModelSyncer():
         for _model_name, _ids in ignore_struct.items():
             logger.debug('Ignoring {}{}'.format(_model_name, str(_ids)))
 
+    def _prepare_model_domain(self, model, since):
+        """Prepare the domain for model search, optionally including timestamp filter"""
+        if model.no_domain:
+            return []
+        domain = list(model.domain)  # Create a copy of the domain to not modify the original
+        if since and not self.force_sync:
+            domain.append(('write_date', '>', since))
+        return domain
+
     def prepare(self):
         syncs = [
             (self.source.odoo, self.dest.odoo, 
@@ -929,9 +939,7 @@ class ModelSyncer():
             for model in models:
                 if model.no_domain:
                     continue
-                domain = model.domain
-                if since:
-                    domain.append(('write_date', '>', since))
+                domain = self._prepare_model_domain(model, since)
                 logger.info(u'Searching: {} {}'.format(model.name, domain))
                 odoo.context = model.context
                 _ids = odoo.env[model.name].search(domain or [])
