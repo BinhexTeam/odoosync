@@ -67,7 +67,7 @@ Add the following to `buildout.cfg`::
 
     [buildout]
     extensions = gp.vcsdevelop
-    vcs-extend-develop = git+ssh://git@github.com/sunflowerit/odoosync.git@master#egg=odoosync-0.1
+  vcs-extend-develop = git+ssh://git@github.com/sunflowerit/odoosync.git@master#egg=odoosync-0.2
 
     [odoo]
     odoo_scripts =
@@ -185,9 +185,11 @@ Contributors
 
 * Hayyan Ebrahem
 * Tom Blauwendraat
+* Christian Ramos (`Christian-RB <https://github.com/Christian-RB>`_)
+* Ariel Barreiros (`arielbarreiros96 <https://github.com/arielbarreiros96>`_)
 
 Maintainer
 ----------
 
-This module is maintained by Sunflower IT.
+This module is maintained by Sunflower IT and Binhex.
 

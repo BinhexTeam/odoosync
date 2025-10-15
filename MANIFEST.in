@@ -1,0 +1,7 @@
+include README.rst
+include requirements.txt
+include pyproject.toml
+include MANIFEST.in
+recursive-include bash-scripts *
+recursive-include examples *
+recursive-include tests *.py
