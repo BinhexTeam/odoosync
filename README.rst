@@ -24,6 +24,26 @@ Main features:
 * Bidirectional sync
 * 'Dry run' mode
 
+Modern architecture
+===================
+
+The refactored codebase exposes a modular API that mirrors the main building
+blocks of a sync session:
+
+* ``odoosync.connection`` wraps connection handling through :class:`OdooInstance`
+  and centralises credential discovery (including support for custom netrc
+  paths and the ``ODOOSYNC_NETRC``/``NETRC`` environment variables).
+* ``odoosync.models`` provides :class:`OdooModel` together with shared
+  constants such as ``DEFAULT_EXCLUDED_FIELDS`` and
+  ``INTERNAL_RUNTIME_FIELDS``.
+* ``odoosync.sync`` contains :class:`ModelSyncer`, the high-level orchestrator
+  that coordinates preparation and data transfer.
+* ``odoosync.core`` offers cross-cutting helpers like
+  :func:`get_logger`, :func:`set_level`, and :class:`SyncException`.
+
+This layout keeps responsibilities focused while preserving backwards
+compatibility with historical imports.
+
 Installation
 ============
 
@@ -92,6 +112,12 @@ Provide a one-off credentials file with::
 
   odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc
 
+Include dependent records discovered through many2one relations by either
+passing ``--sync-dependencies`` on the CLI or setting
+``options.sync_dependencies`` to ``true`` in the YAML file::
+
+  odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc --sync-dependencies
+
 Automatic reuse of records by XML ID is enabled by default. Set
 ``options.auto_xmlid_lookup`` to ``false`` in the YAML file if you prefer to
 force manual mappings for module-provided data instead of relying on shared
@@ -109,9 +135,21 @@ conversions (booleans to integers, integers to floats, many2one relations to
 text, and more). When a conversion is not supported, the mapping is skipped and
 a warning is logged so the record continues untouched.
 
-From other Python scripts::
+Programmatic usage
+------------------
 
-    from odoosync.ModelSyncer import ModelSyncer
+Import the new modular API when embedding odoosync in your own tools:
+
+.. code-block:: python
+
+    from odoosync.connection import OdooInstance
+    from odoosync.core import SyncException, get_logger, set_level
+    from odoosync.models import OdooModel
+    from odoosync.sync import ModelSyncer
+
+Legacy applications can continue importing ``odoosync.ModelSyncer``; the legacy
+module now re-exports the classes above and raises a ``DeprecationWarning`` to
+help plan migrations.
 
 Known issues / Roadmap
 ======================
@@ -143,16 +181,10 @@ Credits
 =======
 
 Contributors
-------------    
+------------
 
-    
-Use a custom netrc file or include dependent records::
-
-  odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc --sync-dependencies
 * Hayyan Ebrahem
 * Tom Blauwendraat
-
-Set ``options.sync_dependencies`` to ``true`` (or pass ``--sync-dependencies`` on the CLI) to create related records discovered while resolving many2one relationships.
 
 Maintainer
 ----------

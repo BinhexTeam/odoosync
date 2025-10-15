@@ -9,11 +9,17 @@ if sys.version_info < (2, 6):
                      "Yours is " + sys.version + os.linesep)
     sys.exit(1)
 
-# a sufficient version of pip is needed to parse Odoo requirement file
-# version 1.4.1 is the one required by reportlab anyway
-requires = [
-    'odoorpc',
-]
+HERE = os.path.abspath(os.path.dirname(__file__))
+
+
+def parse_requirements(filename):
+    path = os.path.join(HERE, filename)
+    with open(path, 'r') as req_file:
+        lines = [line.strip() for line in req_file]
+    return [line for line in lines if line and not line.startswith('#')]
+
+
+requires = parse_requirements('requirements.txt')
 
 if sys.version_info < (2, 7):
     requires.append('ordereddict')

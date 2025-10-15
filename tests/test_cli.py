@@ -102,6 +102,14 @@ class OdooSyncCLITests(unittest.TestCase):
         args, kwargs = mock_syncer.call_args
         self.assertIsNone(args[0].get('options'))
 
+    def test_help_includes_examples_section(self):
+        module = load_cli_module()
+        parser = module.build_parser()
+        help_output = parser.format_help()
+
+        self.assertIn('Examples:', help_output)
+        self.assertIn('odoosync projects.yaml', help_output)
+
 
 if __name__ == '__main__':
     unittest.main()

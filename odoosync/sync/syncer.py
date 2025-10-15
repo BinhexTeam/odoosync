@@ -1,0 +1,536 @@
+import hashlib
+import logging
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
+import odoorpc
+
+from ..connection import OdooInstance
+from ..core import get_logger, set_level
+from ..models import INTERNAL_RUNTIME_FIELDS, OdooModel
+
+logger = get_logger(__name__)
+
+
+class ModelSyncer:
+    """Syncer instance."""
+
+    def __init__(self, _struct: dict, _timestamps: dict, options: Optional[dict] = None):
+        self.options = _struct.get("options", {})
+        self.dry_run = self.options.get("dry_run")
+        self.debug = self.options.get("debug")
+        self.sync_dependencies = bool(self.options.get("sync_dependencies"))
+        self.force_sync = bool(self.options.get("force_sync"))
+
+        self.auto_xmlid_lookup = bool(self.options.get("auto_xmlid_lookup", True))
+        if self.debug:
+            set_level(logging.DEBUG)
+        logger.info("-----------START-----------")
+        logger.debug("Created ModelSyncer instance...")
+        self.manual_mapping = _struct.get("manual_mapping", {})
+        self.reverse_manual_mapping = _struct.get("reverse_manual_mapping", {})
+        self.source_timestamp = _timestamps.get("source")
+        self.dest_timestamp = _timestamps.get("target")
+        default_netrc_path = self.options.get("netrc_path")
+        source_netrc_path = self.options.get("source_netrc_path", default_netrc_path)
+        target_netrc_path = self.options.get("target_netrc_path", default_netrc_path)
+        self.source = OdooInstance(_struct.get("source", {}), source_netrc_path)
+        self.dest = OdooInstance(_struct.get("target", {}), target_netrc_path)
+        self.source_ir_fields = self.source.odoo.env["ir.model.fields"]
+        self.models = [OdooModel(m) for m in _struct.get("models", {}) if not m.get("reverse")]
+        self.models_by_name = {m.name: m for m in self.models}
+        self.reverse_models = [OdooModel(m) for m in _struct.get("models", {}) if m.get("reverse")]
+        self.reverse_models_by_name = {m.name: m for m in self.reverse_models}
+        self.prefix = self.options.get("prefix", "__export_sfit__").rstrip(".")
+        timeout = self.options.get("timeout", 600)
+        self.source.odoo.config["timeout"] = timeout
+        self.dest.odoo.config["timeout"] = timeout
+        self._source_xmlid_cache: Dict[str, Dict[int, Optional[str]]] = defaultdict(dict)
+        self._dest_xmlid_cache: Dict[str, Dict[Tuple[str, str], Optional[int]]] = defaultdict(dict)
+        self._external_translations: Dict[str, Dict[int, int]] = defaultdict(dict)
+
+    def _get_xmlid(self, model_name, _id):
+        return "{}_{}".format(model_name.replace(".", "_"), _id)
+
+    def create_xmlid(self, model_name, source_id, dest_id):
+        """Create a link between source id and dest id."""
+        xmlid = self._get_xmlid(model_name, source_id)
+        self.dest.ir_model_obj.create({
+            "model": model_name,
+            "module": self.prefix,
+            "name": xmlid,
+            "res_id": dest_id,
+        })
+
+    def create_reverse_xmlid(self, model_name, source_id, dest_id):
+        """Create a link between dest id and source id."""
+        xmlid = self._get_xmlid(model_name, dest_id)
+        self.dest.ir_model_obj.create({
+            "model": model_name,
+            "module": self.prefix,
+            "name": xmlid,
+            "res_id": source_id,
+        })
+
+    def _add_translations(self, loaded):
+        """Create translation tables for source record id -> dest record id."""
+        xmlids = []
+        for model_name, _ids in loaded.items():
+            for source_id in list(_ids):
+                xmlids.append(self._get_xmlid(model_name, source_id))
+        dest_external_ids = self.dest.ir_model_obj.search([
+            ("name", "in", xmlids),
+            ("module", "=", self.prefix),
+        ])
+        dest_external_records = self.dest.ir_model_obj.read(dest_external_ids, ["name", "model", "res_id"])
+        for record in dest_external_records:
+            try:
+                source_id = int(str(record["name"].split(".")[-1]).split("_")[-1])
+                self._add_dest_id(record["model"], source_id, record["res_id"])
+            except ValueError:
+                pass
+        for model in self.models:
+            logger.debug("Model %s with %s translations", model.name, len(model.trans))
+
+    def _add_reverse_translations(self, loaded):
+        """Create translation tables for dest record id -> source record id."""
+        dest_external_ids = []
+        for model_name, _ids in loaded.items():
+            dest_external_ids += self.dest.ir_model_obj.search([
+                ("res_id", "in", list(_ids)),
+                ("model", "=", model_name),
+                ("module", "=", self.prefix),
+            ])
+        dest_external_records = self.dest.ir_model_obj.read(dest_external_ids, ["name", "model", "res_id"])
+        for record in dest_external_records:
+            try:
+                source_id = int(str(record["name"].split(".")[-1]).split("_")[-1])
+                self._add_source_id(record["model"], record["res_id"], source_id)
+            except ValueError:
+                pass
+
+    def _translate_to_dest_id(self, model_name, source_id, get_xmlid=False):
+        xmlid = self._get_xmlid(model_name, source_id)
+        record = self.dest.ir_model_obj.search([
+            ("module", "=", self.prefix),
+            ("name", "=", xmlid),
+        ])
+        if record:
+            if get_xmlid:
+                return record
+            return self.dest.ir_model_obj.read(record, ["res_id"])[0]["res_id"]
+        return None
+
+    def _translate_to_source_id(self, model_name, dest_id, get_xmlid=False):
+        record = self.dest.ir_model_obj.search([
+            ("module", "=", self.prefix),
+            ("res_id", "=", dest_id),
+            ("model", "=", model_name),
+        ])
+        if record:
+            if get_xmlid:
+                return record
+            xmlid = self.dest.ir_model_obj.read(record, ["name"])[0]["name"]
+            try:
+                source_id = int(xmlid.split(".")[-1].split("_")[-1])
+            except ValueError:
+                source_id = None
+            return source_id
+        return None
+
+    def _find_dest_id(self, model_name, source_id):
+        model = self.models_by_name.get(model_name)
+        dest_id = self.manual_mapping.get(model_name, {}).get(source_id)
+        if not dest_id and model:
+            dest_id = source_id and model.trans.get(source_id)
+        if not dest_id:
+            dest_id = self._external_translations.get(model_name, {}).get(source_id)
+        if not dest_id and self.auto_xmlid_lookup and source_id:
+            xmlid = self._lookup_source_xmlid(model_name, source_id)
+            if xmlid:
+                dest_id = self._lookup_dest_by_xmlid(model_name, xmlid)
+                if dest_id:
+                    if model:
+                        model.trans[source_id] = dest_id
+                        model.translatable_ids.add(source_id)
+                    self._external_translations[model_name][source_id] = dest_id
+        logger.debug("source %s[%s] -> dest %s[%s]", model_name, source_id, model and model.name, dest_id)
+        return dest_id
+
+    def _find_source_id(self, model_name, dest_id):
+        model = self.reverse_models_by_name.get(model_name)
+        source_id = self.reverse_manual_mapping.get(model_name, {}).get(dest_id)
+        if not source_id:
+            source_id = dest_id and model and model.trans.get(dest_id)
+        logger.debug("dest %s[%s] -> source %s[%s]", model_name, dest_id, model and model.name, source_id)
+        return source_id
+
+    def _add_dest_id(self, model_name, source_id, dest_id):
+        model = self.models_by_name.get(model_name)
+        if model:
+            model.trans[source_id] = dest_id
+            model.translatable_ids.add(source_id)
+
+    def _add_source_id(self, model_name, dest_id, source_id):
+        model = self.reverse_models_by_name.get(model_name)
+        if model:
+            model.trans[dest_id] = source_id
+            model.translatable_ids.add(dest_id)
+
+    def _lookup_source_xmlid(self, model_name, source_id):
+        cache = self._source_xmlid_cache[model_name]
+        if source_id in cache:
+            return cache[source_id]
+        try:
+            ir_model_data = self.source.odoo.env["ir.model.data"]
+        except (AttributeError, KeyError):
+            cache[source_id] = None
+            return None
+        record_ids = ir_model_data.search([
+            ("model", "=", model_name),
+            ("res_id", "=", source_id),
+        ])
+        xmlid = None
+        if record_ids:
+            data = ir_model_data.read(record_ids[:1], ["module", "name"])
+            if data:
+                module = data[0].get("module")
+                name = data[0].get("name")
+                if module and name:
+                    xmlid = f"{module}.{name}"
+        cache[source_id] = xmlid
+        return xmlid
+
+    def _lookup_dest_by_xmlid(self, model_name, xmlid):
+        if not xmlid or "." not in xmlid:
+            return None
+        module, name = xmlid.split(".", 1)
+        cache = self._dest_xmlid_cache[model_name]
+        key = (module, name)
+        if key in cache:
+            return cache[key]
+        try:
+            ir_model_data = self.dest.ir_model_obj
+        except AttributeError:
+            cache[key] = None
+            return None
+        record_ids = ir_model_data.search([
+            ("module", "=", module),
+            ("name", "=", name),
+            ("model", "=", model_name),
+        ])
+        dest_id = None
+        if record_ids:
+            data = ir_model_data.read(record_ids[:1], ["res_id"])
+            if data:
+                dest_id = data[0].get("res_id")
+        cache[key] = dest_id
+        return dest_id
+
+    def _make_hash(self, vals: dict) -> str:
+        _hash = hashlib.md5()
+        for key, value in sorted((k, v) for k, v in vals.items() if k not in INTERNAL_RUNTIME_FIELDS):
+            if key == "id":
+                continue
+            if isinstance(value, (list, tuple)):
+                value = value[0]
+            if not value:
+                value = "___None"
+            _hash.update(str(value).encode("utf-8"))
+        return _hash.hexdigest()
+
+    def _write_or_create_model_record(
+        self,
+        odoo,
+        model,
+        vals,
+        source_id,
+        find_dest_id_function,
+        add_dest_id_function,
+        create_xmlid_function,
+        translate_function,
+        noupdate: bool = False,
+    ):
+        dest_id = find_dest_id_function(model.name, source_id)
+        logger.debug("cache %s->%s (%s)", source_id, dest_id, model.name)
+        if not dest_id:
+            dest_id = translate_function(model.name, source_id)
+            logger.debug("trans %s->%s (%s)", source_id, dest_id, model.name)
+            if dest_id:
+                add_dest_id_function(model.name, source_id, dest_id)
+        obj = odoo.odoo.env[model.name]
+        if dest_id and not noupdate:
+            old_vals = obj.read([dest_id], model.dest_fields)[0]
+            if self._make_hash(old_vals) == self._make_hash(vals):
+                logger.info("no change: not updating %s[%s] from %s", model.name, dest_id, source_id)
+            else:
+                logger.info("updating record %s[%s] from source %s", model.name, dest_id, source_id)
+                try:
+                    if not self.dry_run:
+                        obj.write(dest_id, vals)
+                except odoorpc.error.RPCError as exc:
+                    logger.error("Writing %s[%s] failed: %s", model.name, dest_id, str(exc))
+        if not dest_id:
+            logger.info("creating record from source %s[%s]..", model.name, source_id)
+            if not self.dry_run:
+                try:
+                    dest_id = obj.create(vals)
+                    logger.info(str(dest_id))
+                    add_dest_id_function(model.name, source_id, dest_id)
+                    create_xmlid_function(model.name, source_id, dest_id)
+                except odoorpc.error.RPCError as exc:
+                    logger.error("Creating %s failed: %s", model.name, str(exc))
+
+    def _sync_one_model(self, model: OdooModel) -> None:
+        logger.debug("Totally %s %s records considered for sync...", len(model.records), model.name)
+
+        if model.reverse:
+            find_dest_id_function = self._find_source_id
+            add_dest_id_function = self._add_source_id
+            create_xmlid_function = self.create_reverse_xmlid
+            translate_function = self._translate_to_source_id
+            odoo_instance = self.source
+        else:
+            find_dest_id_function = self._find_dest_id
+            add_dest_id_function = self._add_dest_id
+            create_xmlid_function = self.create_xmlid
+            translate_function = self._translate_to_dest_id
+            odoo_instance = self.dest
+        obj = odoo_instance.odoo.env[model.name]
+
+        to_update = {}
+        to_create = []
+        dest_ids = []
+        for record in model.records:
+            source_id = record["id"]
+            if bool(record.get("__sfit_dep")) and not self.sync_dependencies:
+                logger.debug(
+                    "Skipping dependency record %s[%s] (sync_dependencies disabled)",
+                    model.name,
+                    record.get("id"),
+                )
+                continue
+            dest_id = find_dest_id_function(model.name, source_id)
+            if dest_id:
+                mapped = model._map_fields(record, find_dest_id_function)
+                dest_ids.append(dest_id)
+                record_hash = self._make_hash(mapped)
+                to_update[dest_id] = (source_id, record_hash, mapped)
+                continue
+            if bool(record.get("__sfit_dep")) or source_id not in model.translatable_ids:
+                to_create.append((source_id, record))
+            else:
+                mapped = model._map_fields(record, find_dest_id_function)
+                dest_id = find_dest_id_function(model.name, source_id)
+                if dest_id:
+                    dest_ids.append(dest_id)
+                    record_hash = self._make_hash(mapped)
+                    to_update[dest_id] = (source_id, record_hash, mapped)
+                else:
+                    to_create.append((source_id, record))
+
+        if to_create:
+            logger.info("%s records to create", len(to_create))
+        pending_create = {sid: rec for sid, rec in to_create}
+        created_sources = set()
+        creating_stack = set()
+
+        def _create_source_record(source_id):
+            if source_id in created_sources:
+                return
+            record = pending_create.get(source_id)
+            if not record:
+                return
+            if source_id in creating_stack:
+                logger.warning("Circular dependency detected for %s[%s]", model.name, source_id)
+                return
+            creating_stack.add(source_id)
+            for field, rel_model_name in model.many2onefields.items():
+                if rel_model_name != model.name:
+                    continue
+                rel_value = record.get(field)
+                rel_source_id = rel_value and rel_value[0]
+                if rel_source_id and rel_source_id in pending_create:
+                    _create_source_record(rel_source_id)
+
+            logger.info("creating record from source %s[%s]..", model.name, source_id)
+            mapped = model._map_fields(record, find_dest_id_function)
+            if not self.dry_run:
+                try:
+                    dest_id = obj.create(mapped)
+                    logger.info(str(dest_id))
+                    add_dest_id_function(model.name, source_id, dest_id)
+                    create_xmlid_function(model.name, source_id, dest_id)
+                except odoorpc.error.RPCError as exc:
+                    logger.error("Creating %s failed: %s", model.name, str(exc))
+            creating_stack.remove(source_id)
+            created_sources.add(source_id)
+            pending_create.pop(source_id, None)
+
+        for source_id, _ in to_create:
+            _create_source_record(source_id)
+
+        really_update = []
+        if dest_ids:
+            logger.info("%s records to update", len(to_update))
+            logger.info("Checking hashes...")
+            old_vals = obj.read(dest_ids, model.dest_fields)
+            for vals in old_vals:
+                old_hash = self._make_hash(vals)
+                dest_id = vals["id"]
+                source_id, new_hash, new_vals = to_update[dest_id]
+                if old_hash != new_hash:
+                    really_update.append((source_id, dest_id, new_vals))
+
+        if really_update:
+            logger.info("%s records are changed", len(really_update))
+        for source_id, dest_id, vals in really_update:
+            logger.info("updating record %s[%s] from source %s", model.name, dest_id, source_id)
+            try:
+                if not self.dry_run:
+                    obj.write(dest_id, vals)
+            except odoorpc.error.RPCError as exc:
+                logger.error("Writing %s[%s] failed: %s", model.name, dest_id, str(exc))
+
+    def _load_dependencies_of_records(self, odoo_instance, loaded, other_models, add_translations):
+        count = sum(len(recs) for recs in loaded.values())
+        if not count:
+            return
+        logger.info("Find dependencies for %s records...", count)
+        dep_struct = defaultdict(set)
+        ignore_struct = defaultdict(set)
+        for model_name, records in loaded.items():
+            model = other_models[model_name]
+            for record in records:
+                for field, rel_model_name in model.many2onefields.items():
+                    rel_id = record.get(field) and record.get(field)[0]
+                    rel_model = other_models.get(rel_model_name)
+                    if not rel_model:
+                        ignore_struct[rel_model_name].add(rel_id)
+                    elif rel_id and rel_id in rel_model.record_ids:
+                        continue
+                    elif rel_id:
+                        dep_struct[rel_model_name].add(rel_id)
+        newly_loaded = {}
+        add_translations(dep_struct)
+        for rel_model_name, ids in dep_struct.items():
+            rel_model = other_models[rel_model_name]
+            ids_to_load = ids - rel_model.translatable_ids
+            recs = rel_model.load_recs(odoo_instance, list(ids_to_load), dep=True)
+            newly_loaded[rel_model_name] = recs
+        self._load_dependencies_of_records(odoo_instance, newly_loaded, other_models, add_translations)
+        for rel_model_name, ids in ignore_struct.items():
+            logger.debug("Ignoring %s%s", rel_model_name, str(ids))
+
+    def _prepare_model_domain(self, model: OdooModel, since) -> List[Tuple]:
+        if model.no_domain:
+            return []
+        domain = list(model.domain)
+        if since and not self.force_sync:
+            domain.append(("write_date", ">", since))
+        return domain
+
+    def prepare(self) -> None:
+        syncs = [
+            (
+                self.source.odoo,
+                self.dest.odoo,
+                self.source_timestamp,
+                self.models,
+                False,
+                self.manual_mapping,
+                self.models_by_name,
+                self._add_translations,
+            ),
+            (
+                self.dest.odoo,
+                self.source.odoo,
+                self.dest_timestamp,
+                self.reverse_models,
+                True,
+                self.reverse_manual_mapping,
+                self.reverse_models_by_name,
+                self._add_reverse_translations,
+            ),
+        ]
+        for (
+            odoo_env,
+            dest_odoo_env,
+            since,
+            models,
+            reverse,
+            mapping,
+            models_by_name,
+            add_translations,
+        ) in syncs:
+            logger.info("-----------PREPARE %sSYNC----------", "REVERSE " if reverse else "")
+
+            if self.options.get("sync_modules") and not reverse:
+                logger.info("Syncing modules...")
+                source_module = odoo_env.env["ir.module.module"]
+                dest_module = dest_odoo_env.env["ir.module.module"]
+                source_module_ids = source_module.search([("state", "=", "installed")])
+                source_module_names = source_module.read(source_module_ids, ["name"])
+                source_module_names = [r["name"] for r in source_module_names]
+                dest_modules_ids = dest_module.search([
+                    ("state", "!=", "installed"),
+                    ("name", "in", source_module_names),
+                ])
+                dest_modules = dest_module.browse(dest_modules_ids)
+                logger.info(
+                    "Installing in dest modules %s...",
+                    [r["name"] for r in dest_modules.read(["name"])],
+                )
+                try:
+                    if not self.dry_run:
+                        dest_modules.button_immediate_install()
+                except odoorpc.error.RPCError as exc:
+                    logger.error("Module installation failed: %s", str(exc))
+                    raise
+
+            for model in models:
+                logger.info("Determine fields for model %s...", model.name)
+                model.determine_fields(
+                    odoo_env,
+                    dest_odoo_env,
+                    models,
+                    mapping,
+                    allow_external_m2o=self.auto_xmlid_lookup,
+                )
+
+            for model in models:
+                if model.no_domain:
+                    continue
+                domain = self._prepare_model_domain(model, since)
+                logger.info("Searching: %s %s", model.name, domain)
+                odoo_env.context = model.context
+                ids = odoo_env.env[model.name].search(domain or [])
+                logger.debug("Found: %s", str(ids))
+                model.load_recs(odoo_env, ids)
+
+            translations = {m.name: m.record_ids for m in models}
+            add_translations(translations)
+
+            if self.sync_dependencies:
+                loaded = {m.name: m.records for m in models}
+                self._load_dependencies_of_records(odoo_env, loaded, models_by_name, add_translations)
+
+            for model in models:
+                model.sort_parents_before_children()
+
+    def sync(self) -> None:
+        logger.info("-----------NORMAL SYNC-----------")
+        for model in self.models:
+            self._sync_one_model(model)
+        logger.info("-----------REVERSE SYNC----------")
+        for model in self.reverse_models:
+            self._sync_one_model(model)
+        logger.info("-----------END-----------")
+
+    def get_new_timestamps(self) -> Optional[dict]:
+        if not self.dry_run:
+            return {"source": self.source.timestamp, "target": self.dest.timestamp}
+        return None
+
+
+__all__ = ["ModelSyncer"]
