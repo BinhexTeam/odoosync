@@ -71,11 +71,17 @@ def build_parser():
         action='store_true',
         help='Ignore timestamps and sync all records regardless of last update',
     )
-    parser.add_argument(
+    batch_group = parser.add_mutually_exclusive_group()
+    batch_group.add_argument(
         '--batch-size',
         type=int,
         metavar='N',
         help='Maximum number of records fetched from Odoo per batch (default: 1000)',
+    )
+    batch_group.add_argument(
+        '--no-batch',
+        action='store_true',
+        help='Disable batching entirely and fetch/process all records at once',
     )
     return parser
 
@@ -89,7 +95,13 @@ def main(argv=None):
     with open(yamlfile, 'r') as _file:
         _struct = yaml.load(_file, Loader=yaml.SafeLoader)
 
-    if args.netrc_file or args.sync_dependencies or args.force_sync or args.batch_size is not None:
+    if (
+        args.netrc_file
+        or args.sync_dependencies
+        or args.force_sync
+        or args.batch_size is not None
+        or args.no_batch
+    ):
         options = _struct.setdefault('options', {})
         if args.netrc_file:
             options['netrc_path'] = args.netrc_file
@@ -99,6 +111,9 @@ def main(argv=None):
             options['force_sync'] = True
         if args.batch_size is not None:
             options['batch_size'] = args.batch_size
+        if args.no_batch:
+            options.pop('batch_size', None)
+            options['disable_batching'] = True
 
     # Open timestamp file
     timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'

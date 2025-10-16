@@ -124,6 +124,22 @@ class OdooSyncCLITests(unittest.TestCase):
         args, kwargs = mock_syncer.call_args
         self.assertEqual(args[0]['options']['batch_size'], 250)
 
+    def test_cli_disables_batching_flag(self):
+        module = load_cli_module()
+        yaml_path = self._write_yaml('{"source": {}, "target": {}, "models": []}')
+
+        mock_instance = MagicMock()
+        mock_instance.get_new_timestamps.return_value = {}
+
+        with patch.object(module, 'ModelSyncer', return_value=mock_instance) as mock_syncer:
+            with patch.object(sys, 'argv', ['odoosync', yaml_path, '--no-batch']):
+                module.main()
+
+        args, kwargs = mock_syncer.call_args
+        options = args[0]['options']
+        self.assertTrue(options['disable_batching'])
+        self.assertNotIn('batch_size', options)
+
 
 if __name__ == '__main__':
     unittest.main()

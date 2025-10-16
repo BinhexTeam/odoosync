@@ -20,6 +20,13 @@ class FakeOdooModel:
         self.write_calls = []
 
     def create(self, vals):
+        if isinstance(vals, list):
+            ids = []
+            for item in vals:
+                stored = dict(item)
+                self.created.append(stored)
+                ids.append(len(self.created))
+            return ids
         stored = dict(vals)
         self.created.append(stored)
         return len(self.created)
@@ -72,6 +79,7 @@ class DependencyFlagTests(unittest.TestCase):
         syncer = ModelSyncer.__new__(ModelSyncer)
         syncer.sync_dependencies = sync_dependencies
         syncer.dry_run = False
+        syncer.batch_size = 1000
         translations = {}
         syncer.auto_xmlid_lookup = False
         syncer._external_translations = defaultdict(dict)

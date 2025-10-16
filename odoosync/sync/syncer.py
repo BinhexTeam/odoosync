@@ -1,7 +1,7 @@
 import hashlib
 import logging
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import odoorpc
 
@@ -49,8 +49,11 @@ class ModelSyncer:
         self._dest_xmlid_cache: Dict[str, Dict[Tuple[str, str], Optional[int]]] = defaultdict(dict)
         self._external_translations: Dict[str, Dict[int, int]] = defaultdict(dict)
         default_batch_size = 1000
+        disable_batching = bool(self.options.get("disable_batching"))
         batch_size_option = self.options.get("batch_size")
-        if batch_size_option is None:
+        if disable_batching:
+            self.batch_size = None
+        elif batch_size_option is None:
             self.batch_size = default_batch_size
         else:
             try:
@@ -507,11 +510,12 @@ class ModelSyncer:
         if to_create:
             logger.info("%s records to create", len(to_create))
         pending_create = {sid: rec for sid, rec in to_create}
-        created_sources = set()
+        scheduled = set()
         creating_stack = set()
+        creation_sequence: List[int] = []
 
-        def _create_source_record(source_id):
-            if source_id in created_sources:
+        def _schedule_source_record(source_id):
+            if source_id in scheduled:
                 return
             record = pending_create.get(source_id)
             if not record:
@@ -526,24 +530,78 @@ class ModelSyncer:
                 rel_value = record.get(field)
                 rel_source_id = rel_value and rel_value[0]
                 if rel_source_id and rel_source_id in pending_create:
-                    _create_source_record(rel_source_id)
+                    _schedule_source_record(rel_source_id)
+            creation_sequence.append(source_id)
+            scheduled.add(source_id)
+            creating_stack.remove(source_id)
 
-            logger.info("creating record from source %s[%s]..", model.name, source_id)
-            mapped = model._map_fields(record, find_dest_id_function)
+        for source_id, _ in to_create:
+            _schedule_source_record(source_id)
+
+        def _flush_create_batch(batch_source_ids: List[int], batch_payload: List[dict]) -> List[int]:
+            if not batch_source_ids or not batch_payload:
+                return []
+            logger.info("creating %s records from sources %s", len(batch_source_ids), batch_source_ids)
+            dest_ids: List[int] = []
             if not self.dry_run:
                 try:
-                    dest_id = obj.create(mapped)
+                    payload = batch_payload[0] if len(batch_payload) == 1 else batch_payload
+                    created = obj.create(payload)
+                    if isinstance(created, list):
+                        dest_ids = created
+                    else:
+                        dest_ids = [created]
+                except odoorpc.error.RPCError as exc:
+                    logger.error("Creating %s failed: %s", model.name, str(exc))
+                    return
+                if len(dest_ids) != len(batch_source_ids):
+                    logger.warning(
+                        "Mismatch between created IDs (%s) and source batch (%s) for %s",
+                        len(dest_ids),
+                        len(batch_source_ids),
+                        model.name,
+                    )
+            created = []
+            for index, source_id in enumerate(batch_source_ids):
+                dest_id = dest_ids[index] if index < len(dest_ids) else None
+                if dest_id:
                     logger.info(str(dest_id))
                     add_dest_id_function(model.name, source_id, dest_id)
                     create_xmlid_function(model.name, source_id, dest_id)
-                except odoorpc.error.RPCError as exc:
-                    logger.error("Creating %s failed: %s", model.name, str(exc))
-            creating_stack.remove(source_id)
-            created_sources.add(source_id)
-            pending_create.pop(source_id, None)
+                    created.append(source_id)
+                pending_create.pop(source_id, None)
+            return created
 
-        for source_id, _ in to_create:
-            _create_source_record(source_id)
+        batch_payload: List[dict] = []
+        batch_sources: List[int] = []
+        created_sources: Set[int] = set()
+        for source_id in creation_sequence:
+            record = pending_create.get(source_id)
+            if not record:
+                continue
+            needs_flush = False
+            for field, rel_model_name in model.many2onefields.items():
+                if rel_model_name != model.name:
+                    continue
+                rel_value = record.get(field)
+                rel_source_id = rel_value and rel_value[0]
+                if rel_source_id and rel_source_id in pending_create and rel_source_id not in created_sources:
+                    needs_flush = True
+                    break
+            if needs_flush and batch_sources:
+                created_sources.update(_flush_create_batch(batch_sources, batch_payload))
+                batch_sources = []
+                batch_payload = []
+            logger.info("creating record from source %s[%s]..", model.name, source_id)
+            mapped = model._map_fields(record, find_dest_id_function)
+            batch_sources.append(source_id)
+            batch_payload.append(mapped)
+            if self.batch_size and len(batch_payload) >= self.batch_size:
+                created_sources.update(_flush_create_batch(batch_sources, batch_payload))
+                batch_payload = []
+                batch_sources = []
+        if batch_payload:
+            created_sources.update(_flush_create_batch(batch_sources, batch_payload))
 
         really_update = []
         if dest_ids:

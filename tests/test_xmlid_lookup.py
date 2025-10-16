@@ -27,6 +27,13 @@ class FakeOdooModel:
         self.data = existing or {}
 
     def create(self, vals):
+        if isinstance(vals, list):
+            new_ids = []
+            for item in vals:
+                self.created.append(dict(item))
+                new_id = len(self.data) + len(self.created)
+                new_ids.append(new_id)
+            return new_ids
         self.created.append(dict(vals))
         new_id = len(self.data) + len(self.created)
         return new_id
@@ -94,6 +101,7 @@ class XmlIdLookupTests(unittest.TestCase):
         syncer = ModelSyncer.__new__(ModelSyncer)
         syncer.sync_dependencies = True
         syncer.dry_run = False
+        syncer.batch_size = 1000
         syncer.auto_xmlid_lookup = True
         syncer.manual_mapping = {}
         syncer.reverse_manual_mapping = {}
