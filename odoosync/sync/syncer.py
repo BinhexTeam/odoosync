@@ -48,6 +48,32 @@ class ModelSyncer:
         self._source_xmlid_cache: Dict[str, Dict[int, Optional[str]]] = defaultdict(dict)
         self._dest_xmlid_cache: Dict[str, Dict[Tuple[str, str], Optional[int]]] = defaultdict(dict)
         self._external_translations: Dict[str, Dict[int, int]] = defaultdict(dict)
+        default_batch_size = 1000
+        batch_size_option = self.options.get("batch_size")
+        if batch_size_option is None:
+            self.batch_size = default_batch_size
+        else:
+            try:
+                parsed = int(batch_size_option)
+                if parsed <= 0:
+                    logger.warning(
+                        "Batch size %s is non-positive; disabling batching and loading all records at once",
+                        batch_size_option,
+                    )
+                    self.batch_size = None
+                else:
+                    self.batch_size = parsed
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid batch size %s provided; falling back to default of %s",
+                    batch_size_option,
+                    default_batch_size,
+                )
+                self.batch_size = default_batch_size
+        if self.batch_size:
+            logger.debug("Using batch size %s for record retrieval", self.batch_size)
+        else:
+            logger.debug("Batch size disabled; fetching records in a single request")
 
     def _get_xmlid(self, model_name, _id):
         return "{}_{}".format(model_name.replace(".", "_"), _id)
@@ -416,7 +442,12 @@ class ModelSyncer:
         for rel_model_name, ids in dep_struct.items():
             rel_model = other_models[rel_model_name]
             ids_to_load = ids - rel_model.translatable_ids
-            recs = rel_model.load_recs(odoo_instance, list(ids_to_load), dep=True)
+            recs = rel_model.load_recs(
+                odoo_instance,
+                list(ids_to_load),
+                dep=True,
+                chunk_size=self.batch_size,
+            )
             newly_loaded[rel_model_name] = recs
         self._load_dependencies_of_records(odoo_instance, newly_loaded, other_models, add_translations)
         for rel_model_name, ids in ignore_struct.items():
@@ -504,9 +535,25 @@ class ModelSyncer:
                 domain = self._prepare_model_domain(model, since)
                 logger.info("Searching: %s %s", model.name, domain)
                 odoo_env.context = model.context
-                ids = odoo_env.env[model.name].search(domain or [])
-                logger.debug("Found: %s", str(ids))
-                model.load_recs(odoo_env, ids)
+                limit = self.batch_size if self.batch_size else None
+                offset = 0
+                while True:
+                    search_kwargs = {}
+                    if limit:
+                        search_kwargs.update({"offset": offset, "limit": limit})
+                    ids = odoo_env.env[model.name].search(domain or [], **search_kwargs)
+                    if not ids:
+                        break
+                    logger.debug(
+                        "Found %s records for %s (offset %s)",
+                        len(ids),
+                        model.name,
+                        offset,
+                    )
+                    model.load_recs(odoo_env, ids, chunk_size=self.batch_size)
+                    if not limit:
+                        break
+                    offset += len(ids)
 
             translations = {m.name: m.record_ids for m in models}
             add_translations(translations)

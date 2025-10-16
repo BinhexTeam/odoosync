@@ -39,13 +39,38 @@ class OdooModel:
         self.trans: Dict[int, int] = {}
         self.translatable_ids: Set[int] = set()
 
-    def load_recs(self, odoo, _ids: Iterable[int], dep: bool = False) -> List[dict]:
+    def load_recs(self, odoo, _ids: Iterable[int], dep: bool = False, chunk_size: Optional[int] = None) -> List[dict]:
         """Loads records into this model."""
-        loaded = []
-        if _ids:
-            logger.info("Reading %s %s records from server...", len(_ids), self.name)
-            source_obj = odoo.env[self.name]
-            records = source_obj.read(_ids, self.fields)
+        loaded: List[dict] = []
+        id_list = list(_ids or [])
+        if not id_list:
+            return loaded
+
+        if chunk_size and chunk_size > 0:
+            logger.info(
+                "Reading %s %s records from server in batches of up to %s...",
+                len(id_list),
+                self.name,
+                chunk_size,
+            )
+            batches = [id_list[i : i + chunk_size] for i in range(0, len(id_list), chunk_size)]
+        else:
+            logger.info("Reading %s %s records from server...", len(id_list), self.name)
+            batches = [id_list]
+
+        source_obj = odoo.env[self.name]
+        for batch in batches:
+            try:
+                records = source_obj.read(batch, self.fields)
+            except Exception as exc:  # noqa: BLE001 - surface remote RPC errors
+                logger.error(
+                    "Failed to read batch containing %s records for %s: %s",
+                    len(batch),
+                    self.name,
+                    exc,
+                )
+                continue
+
             if dep:
                 for record in records:
                     record.update({"__sfit_dep": True})

@@ -110,6 +110,20 @@ class OdooSyncCLITests(unittest.TestCase):
         self.assertIn('Examples:', help_output)
         self.assertIn('odoosync projects.yaml', help_output)
 
+    def test_cli_accepts_batch_size(self):
+        module = load_cli_module()
+        yaml_path = self._write_yaml('{"source": {}, "target": {}, "models": []}')
+
+        mock_instance = MagicMock()
+        mock_instance.get_new_timestamps.return_value = {}
+
+        with patch.object(module, 'ModelSyncer', return_value=mock_instance) as mock_syncer:
+            with patch.object(sys, 'argv', ['odoosync', yaml_path, '--batch-size', '250']):
+                module.main()
+
+        args, kwargs = mock_syncer.call_args
+        self.assertEqual(args[0]['options']['batch_size'], 250)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -42,7 +42,8 @@ def build_parser():
           odoosync projects.yaml
           odoosync projects.yaml --netrc-file ~/.config/odoosync/credentials.netrc
           odoosync projects.yaml --sync-dependencies
-          odoosync projects.yaml --force-sync --sync-dependencies
+                    odoosync projects.yaml --force-sync --sync-dependencies
+                    odoosync projects.yaml --batch-size 500
         """
     )
     parser = argparse.ArgumentParser(
@@ -70,6 +71,12 @@ def build_parser():
         action='store_true',
         help='Ignore timestamps and sync all records regardless of last update',
     )
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        metavar='N',
+        help='Maximum number of records fetched from Odoo per batch (default: 1000)',
+    )
     return parser
 
 
@@ -82,7 +89,7 @@ def main(argv=None):
     with open(yamlfile, 'r') as _file:
         _struct = yaml.load(_file, Loader=yaml.SafeLoader)
 
-    if args.netrc_file or args.sync_dependencies or args.force_sync:
+    if args.netrc_file or args.sync_dependencies or args.force_sync or args.batch_size is not None:
         options = _struct.setdefault('options', {})
         if args.netrc_file:
             options['netrc_path'] = args.netrc_file
@@ -90,6 +97,8 @@ def main(argv=None):
             options['sync_dependencies'] = True
         if args.force_sync:
             options['force_sync'] = True
+        if args.batch_size is not None:
+            options['batch_size'] = args.batch_size
 
     # Open timestamp file
     timestampfile = os.path.splitext(yamlfile)[0] + '.timestamp'
