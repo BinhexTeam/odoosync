@@ -1,7 +1,7 @@
 import hashlib
 import logging
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import odoorpc
 
@@ -167,10 +167,16 @@ class ModelSyncer:
     def _find_dest_id(self, model_name, source_id):
         model = self.models_by_name.get(model_name)
         dest_id = self.manual_mapping.get(model_name, {}).get(source_id)
+        if dest_id and model:
+            model.trans[source_id] = dest_id
+            model.translatable_ids.add(source_id)
         if not dest_id and model:
             dest_id = source_id and model.trans.get(source_id)
         if not dest_id:
             dest_id = self._external_translations.get(model_name, {}).get(source_id)
+            if dest_id and model:
+                model.trans[source_id] = dest_id
+                model.translatable_ids.add(source_id)
         if not dest_id and self.auto_xmlid_lookup and source_id:
             xmlid = self._lookup_source_xmlid(model_name, source_id)
             if xmlid:
@@ -253,6 +259,148 @@ class ModelSyncer:
         cache[key] = dest_id
         return dest_id
 
+    def _iter_batches(self, items: Iterable[int], size: Optional[int]) -> Iterable[List[int]]:
+        sequence = list(items)
+        if not sequence:
+            return
+        if not size or size <= 0:
+            yield sequence
+            return
+        for index in range(0, len(sequence), size):
+            yield sequence[index : index + size]
+
+    def _lookup_source_xmlids_bulk(self, model_name: str, source_ids: List[int]) -> Dict[int, Optional[str]]:
+        cache = self._source_xmlid_cache[model_name]
+        result: Dict[int, Optional[str]] = {}
+        missing = [sid for sid in source_ids if sid not in cache]
+
+        if missing:
+            try:
+                ir_model_data = self.source.odoo.env["ir.model.data"]
+            except (AttributeError, KeyError, TypeError):
+                for sid in missing:
+                    cache[sid] = None
+            else:
+                chunk_size = getattr(self, "batch_size", None) or len(missing)
+                for chunk in self._iter_batches(missing, chunk_size):
+                    record_ids = ir_model_data.search([
+                        ("model", "=", model_name),
+                        ("res_id", "in", chunk),
+                    ])
+                    records = ir_model_data.read(record_ids, ["res_id", "module", "name"]) if record_ids else []
+                    data_by_res = {rec.get("res_id"): rec for rec in records}
+                    for source_id in chunk:
+                        record = data_by_res.get(source_id)
+                        module = record and record.get("module")
+                        name = record and record.get("name")
+                        if module and name:
+                            cache[source_id] = f"{module}.{name}"
+                        else:
+                            cache.setdefault(source_id, None)
+
+        for source_id in source_ids:
+            result[source_id] = cache.get(source_id)
+        return result
+
+    def _lookup_dest_ids_by_xmlid_bulk(self, model_name: str, xmlids: Dict[int, str]) -> Dict[int, Optional[int]]:
+        cache = self._dest_xmlid_cache[model_name]
+        result: Dict[int, Optional[int]] = {}
+        by_module: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+
+        for source_id, xmlid in xmlids.items():
+            if not xmlid or "." not in xmlid:
+                result[source_id] = None
+                continue
+            module, name = xmlid.split(".", 1)
+            key = (module, name)
+            if key in cache:
+                result[source_id] = cache[key]
+            else:
+                by_module[module].append((source_id, name))
+
+        if by_module:
+            try:
+                model_data = self.dest.ir_model_obj
+            except AttributeError:
+                model_data = None
+
+            if model_data:
+                for module, entries in by_module.items():
+                    names = [name for _, name in entries]
+                    record_ids = model_data.search([
+                        ("module", "=", module),
+                        ("name", "in", names),
+                        ("model", "=", model_name),
+                    ])
+                    records = model_data.read(record_ids, ["module", "name", "res_id"]) if record_ids else []
+                    name_to_res = {rec.get("name"): rec.get("res_id") for rec in records}
+                    for source_id, name in entries:
+                        dest_id = name_to_res.get(name)
+                        cache[(module, name)] = dest_id
+                        result[source_id] = dest_id
+                    # Ensure we cache negative lookups as well
+                    for source_id, name in entries:
+                        cache.setdefault((module, name), result.get(source_id))
+            else:
+                for module, entries in by_module.items():
+                    for source_id, name in entries:
+                        cache[(module, name)] = None
+                        result[source_id] = None
+
+        for source_id, xmlid in xmlids.items():
+            if source_id in result:
+                continue
+            if not xmlid or "." not in xmlid:
+                result[source_id] = None
+                continue
+            module, name = xmlid.split(".", 1)
+            result[source_id] = cache.get((module, name))
+        return result
+
+    def _prefetch_destination_ids(self, model: OdooModel, records: List[dict]) -> None:
+        if not records or not model.name:
+            return
+        if not hasattr(model, "trans") or not hasattr(model, "translatable_ids"):
+            return
+
+        manual_map = self.manual_mapping.get(model.name, {})
+        existing_trans = model.trans
+        unresolved: List[int] = []
+
+        for record in records:
+            source_id = record.get("id")
+            if not source_id:
+                continue
+            dest_id = manual_map.get(source_id)
+            if dest_id:
+                existing_trans[source_id] = dest_id
+                model.translatable_ids.add(source_id)
+                continue
+            dest_id = existing_trans.get(source_id)
+            if dest_id:
+                continue
+            dest_id = self._external_translations.get(model.name, {}).get(source_id)
+            if dest_id:
+                existing_trans[source_id] = dest_id
+                model.translatable_ids.add(source_id)
+                continue
+            unresolved.append(source_id)
+
+        if not unresolved or not self.auto_xmlid_lookup:
+            return
+
+        xmlids = self._lookup_source_xmlids_bulk(model.name, unresolved)
+        lookup_candidates = {sid: xmlid for sid, xmlid in xmlids.items() if xmlid}
+        if not lookup_candidates:
+            return
+
+        dest_ids = self._lookup_dest_ids_by_xmlid_bulk(model.name, lookup_candidates)
+        for source_id, dest_id in dest_ids.items():
+            if dest_id:
+                existing_trans[source_id] = dest_id
+                model.translatable_ids.add(source_id)
+                self._external_translations[model.name][source_id] = dest_id
+
     def _make_hash(self, vals: dict) -> str:
         _hash = hashlib.md5()
         for key, value in sorted((k, v) for k, v in vals.items() if k not in INTERNAL_RUNTIME_FIELDS):
@@ -322,6 +470,7 @@ class ModelSyncer:
             create_xmlid_function = self.create_xmlid
             translate_function = self._translate_to_dest_id
             odoo_instance = self.dest
+            self._prefetch_destination_ids(model, model.records)
         obj = odoo_instance.odoo.env[model.name]
 
         to_update = {}

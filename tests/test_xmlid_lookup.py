@@ -50,11 +50,17 @@ class FakeIrModelData:
         for entry in self.entries:
             matched = True
             for field, op, value in domain:
-                if op != '=':
-                    raise NotImplementedError('Only equality domains supported in tests')
-                if entry.get(field) != value:
-                    matched = False
-                    break
+                entry_value = entry.get(field)
+                if op == '=':
+                    if entry_value != value:
+                        matched = False
+                        break
+                elif op == 'in':
+                    if entry_value not in value:
+                        matched = False
+                        break
+                else:
+                    raise NotImplementedError('Unsupported operator in test stub')
             if matched:
                 results.append(entry['id'])
         return results
