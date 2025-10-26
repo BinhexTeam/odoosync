@@ -89,6 +89,36 @@ class ValueMappingTests(unittest.TestCase):
         mapped = model._map_fields(data, lambda *args, **kwargs: None)
         self.assertEqual(mapped['category'], 'VIP')
 
+    def test_selection_to_boolean_mapping(self):
+        model = OdooModel({
+            'model': 'product.template',
+            'field_mappings': {
+                'type': 'is_storable',
+            },
+            'value_mappings': {
+                'type': {
+                    'product': True,
+                    '__default__': False,
+                }
+            },
+        })
+        model.fields = ['type']
+        model.dest_fields = ['is_storable']
+        model.field_specs = {
+            'type': {
+                'dest_field': 'is_storable',
+                'source_type': 'selection',
+                'source_relation': None,
+                'dest_type': 'boolean',
+                'dest_relation': None,
+            }
+        }
+        mapped_product = model._map_fields({'type': 'product'}, lambda *args, **kwargs: None)
+        self.assertTrue(mapped_product['is_storable'])
+
+        mapped_service = model._map_fields({'type': 'service'}, lambda *args, **kwargs: None)
+        self.assertFalse(mapped_service['is_storable'])
+
     def test_constant_mapping_overrides_all_values(self):
         model = OdooModel({
             'model': 'res.partner',

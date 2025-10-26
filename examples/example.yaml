@@ -20,6 +20,9 @@ record_id_mappings:
   reverse:
     res.partner:
       99: 10  # when reverse syncing, reuse source id 99 for dest id 10
+  xmlid_overrides:
+    uom.uom:
+      product.product_uom_unit: uom.product_uom_unit  # translate source xmlid to new module prefix
 
 options:
   prefix: '__export_sfit__'  # Use a custom prefix for xmlids
@@ -38,21 +41,14 @@ models:
     x_field: y_field        # rename custom field when the destination uses y_field
     email_formatted: email  # flatten formatted email into the standard email field
   value_mappings:
-    country_id:
-      type: many2one
-      by_xmlid: base.es   # fallback XMLID lookup when manual match fails
-    customer_rank:
-      type: integer
-      map:
-        0: 0
-        1: 10
-        2: 20              # scale customer rank on write
     lang:
-      type: selection
-      default: es_ES        # use a default when value missing
-      map:
-        en_US: es_ES
-        nl_NL: es_ES
+      en_US: es_ES
+      nl_NL: es_ES
+      __default__: es_ES     # default when value missing
+    customer_rank:
+      0: 0
+      1: 10
+      2: 20                  # scale customer rank on write
   excluded_fields:
   - signup_url               # skip marketing signup URL
   context: {'active_test': False}
@@ -65,16 +61,13 @@ models:
   - tax_ids
   field_mappings:
     x_barcode: barcode
+    type: is_storable
   value_mappings:
-    sale_ok:
-      type: boolean
-      map:
-        false: false
-        true: true
+    sale_ok: True
     type:
-      type: selection
-      map:
-        consumable: product
+      product: True
+      service: False
+      __default__: False
   excluded_fields:
   - message_ids
 

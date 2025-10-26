@@ -257,15 +257,15 @@ class OdooModel:
             dest_field = spec.get("dest_field") if spec else source_field
             value = data.get(source_field)
 
+            preprocessed_value = self._apply_value_mapping(source_field, value)
             converted, ok, message = self._convert_field_value(
-                source_field, dest_field, spec, value, find_dest_id_function
+                source_field, dest_field, spec, preprocessed_value, find_dest_id_function
             )
 
             if ok:
                 if message:
                     logger.warning(message)
-                mapped_value = self._apply_value_mapping(source_field, converted)
-                mapped[dest_field] = mapped_value
+                mapped[dest_field] = converted
             else:
                 logger.warning(
                     "Skipping field mapping %s[%s] -> %s: %s",

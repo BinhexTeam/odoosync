@@ -60,19 +60,6 @@ To add the script to the path, add the following to your `$HOME/.profile`::
         PATH="$HOME/.local/bin:$PATH"
     fi
 
-Using the Anybox buildout recipe
---------------------------------
-
-Add the following to `buildout.cfg`::
-
-    [buildout]
-    extensions = gp.vcsdevelop
-  vcs-extend-develop = git+ssh://git@github.com/sunflowerit/odoosync.git@master#egg=odoosync-0.2
-
-    [odoo]
-    odoo_scripts =
-        odoosync=odoosync
-
 Configuration
 =============
 
@@ -135,6 +122,36 @@ conversions (booleans to integers, integers to floats, many2one relations to
 text, and more). When a conversion is not supported, the mapping is skipped and
 a warning is logged so the record continues untouched.
 
+To tweak field contents during sync, add a ``value_mappings`` block inside the
+model entry. Each key maps a source field either to a constant value applied to
+all records, or to a dictionary with optional ``__default__`` fallback::
+
+  value_mappings:
+    available_in_pos: True
+    type:
+      product: consu
+      service: service
+      __default__: consu
+
+In this example all products become available at the POS, and legacy ``product``
+types are rewritten to ``consu`` while preserving services. Combine
+``value_mappings`` with ``record_id_mappings.xmlid_overrides`` when upstream
+modules rename their XML identifiers (for instance ``product.uom`` →
+``uom.uom`` between Odoo releases).
+
+To translate a legacy selection into a boolean flag on the destination model,
+map the field and attach a ``value_mappings`` block::
+
+  field_mappings:
+    type: is_storable
+  value_mappings:
+    type:
+      product: True
+      __default__: False
+
+This keeps legacy ``type`` values for other records untouched while marking
+only ``product`` entries as storable.
+
 To predefine explicit ID translations between environments (for example, for
 ``res.company`` IDs that are created manually on each side), populate the
 ``record_id_mappings`` block at the top level::
@@ -146,11 +163,17 @@ To predefine explicit ID translations between environments (for example, for
     reverse:
       res.partner:
         10: 99  # when syncing in reverse, reuse source id 99 for dest id 10
+    xmlid_overrides:
+      uom.uom:
+        product.product_uom_unit: uom.product_uom_unit  # rewrite source xmlid before the lookup
 
-Both ``forward`` and ``reverse`` sections are optional. During a transition
-period the legacy ``manual_mapping`` and ``reverse_manual_mapping`` keys are
-still accepted but emit deprecation warnings; update YAML files to the new
-structure to silence them.
+``xmlid_overrides`` lets you translate XML IDs before looking them up on the
+destination server, which is handy when the target instance lives on a newer
+Odoo release that renamed modules (``product.`` → ``uom.`` in the example
+above). All three sections are optional. During a transition period the
+legacy ``manual_mapping`` and ``reverse_manual_mapping`` keys are still
+accepted but emit deprecation warnings; update YAML files to the new structure
+to silence them.
 
 Programmatic usage
 ------------------

@@ -41,7 +41,6 @@ setup(
     tests_require=requires,
     classifiers=[
         'Development Status :: 5 - Production/Stable',
-        'Framework :: Buildout :: Recipe',
         'Intended Audience :: Developers',
         'Intended Audience :: System Administrators',
         'License :: OSI Approved :: GNU Affero General Public License v3 or '

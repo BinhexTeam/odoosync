@@ -27,9 +27,10 @@ class ModelSyncer:
             set_level(logging.DEBUG)
         logger.info("-----------START-----------")
         logger.debug("Created ModelSyncer instance...")
-        forward_id_map, reverse_id_map = self._parse_record_id_mappings(_struct)
+        forward_id_map, reverse_id_map, xmlid_overrides = self._parse_record_id_mappings(_struct)
         self.record_id_map_forward = forward_id_map
         self.record_id_map_reverse = reverse_id_map
+        self.record_id_xmlid_overrides = xmlid_overrides
         self.source_timestamp = _timestamps.get("source")
         self.dest_timestamp = _timestamps.get("target")
         default_netrc_path = self.options.get("netrc_path")
@@ -79,7 +80,9 @@ class ModelSyncer:
         else:
             logger.debug("Batch size disabled; fetching records in a single request")
 
-    def _parse_record_id_mappings(self, struct: dict) -> Tuple[Dict[str, Dict[int, int]], Dict[str, Dict[int, int]]]:
+    def _parse_record_id_mappings(
+        self, struct: dict
+    ) -> Tuple[Dict[str, Dict[int, int]], Dict[str, Dict[int, int]], Dict[str, Dict[str, str]]]:
         mapping_cfg = struct.get("record_id_mappings") or {}
         if not isinstance(mapping_cfg, dict):
             logger.warning("Ignoring invalid `record_id_mappings` value; expected a mapping but got %r", mapping_cfg)
@@ -87,6 +90,7 @@ class ModelSyncer:
 
         forward_cfg = mapping_cfg.get("forward") if isinstance(mapping_cfg, dict) else {}
         reverse_cfg = mapping_cfg.get("reverse") if isinstance(mapping_cfg, dict) else {}
+        xmlid_overrides_cfg = mapping_cfg.get("xmlid_overrides") if isinstance(mapping_cfg, dict) else {}
 
         if forward_cfg is not None and not isinstance(forward_cfg, dict):
             logger.warning(
@@ -100,6 +104,12 @@ class ModelSyncer:
                 reverse_cfg,
             )
             reverse_cfg = {}
+        if xmlid_overrides_cfg is not None and not isinstance(xmlid_overrides_cfg, dict):
+            logger.warning(
+                "Ignoring invalid `record_id_mappings.xmlid_overrides`; expected a mapping but got %r",
+                xmlid_overrides_cfg,
+            )
+            xmlid_overrides_cfg = {}
 
         legacy_forward = struct.get("manual_mapping")
         legacy_reverse = struct.get("reverse_manual_mapping")
@@ -152,7 +162,52 @@ class ModelSyncer:
                 continue
             reverse_map[model_name] = dict(mapping or {})
 
-        return forward_map, reverse_map
+        xmlid_overrides_map: Dict[str, Dict[str, str]] = {}
+        for model_name, overrides in (xmlid_overrides_cfg or {}).items():
+            if not isinstance(overrides, dict):
+                logger.warning(
+                    "Skipping xmlid overrides for %s; expected a mapping but got %r",
+                    model_name,
+                    overrides,
+                )
+                continue
+            cleaned: Dict[str, str] = {}
+            for source_xmlid, dest_xmlid in overrides.items():
+                if not isinstance(source_xmlid, str) or not isinstance(dest_xmlid, str):
+                    logger.warning(
+                        "Ignoring non-string xmlid override %r -> %r for model %s",
+                        source_xmlid,
+                        dest_xmlid,
+                        model_name,
+                    )
+                    continue
+                cleaned[source_xmlid] = dest_xmlid
+            if cleaned:
+                xmlid_overrides_map[model_name] = cleaned
+
+        return forward_map, reverse_map, xmlid_overrides_map
+
+    def _apply_xmlid_override(self, model_name: str, xmlid: Optional[str]) -> Optional[str]:
+        if not xmlid:
+            return xmlid
+        overrides = getattr(self, "record_id_xmlid_overrides", {}).get(model_name)
+        if overrides:
+            return overrides.get(xmlid, xmlid)
+        return xmlid
+
+    def _apply_xmlid_overrides_bulk(self, model_name: str, xmlids: Dict[int, Optional[str]]) -> Dict[int, Optional[str]]:
+        if not xmlids:
+            return xmlids
+        overrides = getattr(self, "record_id_xmlid_overrides", {}).get(model_name)
+        if not overrides:
+            return xmlids
+        adjusted: Dict[int, Optional[str]] = {}
+        for source_id, xmlid in xmlids.items():
+            if xmlid and xmlid in overrides:
+                adjusted[source_id] = overrides[xmlid]
+            else:
+                adjusted[source_id] = xmlid
+        return adjusted
 
     def _get_xmlid(self, model_name, _id):
         return "{}_{}".format(model_name.replace(".", "_"), _id)
@@ -258,13 +313,14 @@ class ModelSyncer:
                 model.translatable_ids.add(source_id)
         if not dest_id and self.auto_xmlid_lookup and source_id:
             xmlid = self._lookup_source_xmlid(model_name, source_id)
+            xmlid = self._apply_xmlid_override(model_name, xmlid)
             if xmlid:
                 dest_id = self._lookup_dest_by_xmlid(model_name, xmlid)
                 if dest_id:
                     if model:
                         model.trans[source_id] = dest_id
                         model.translatable_ids.add(source_id)
-                    self._external_translations[model_name][source_id] = dest_id
+                    self._external_translations.setdefault(model_name, {})[source_id] = dest_id
         logger.debug("source %s[%s] -> dest %s[%s]", model_name, source_id, model and model.name, dest_id)
         return dest_id
 
@@ -497,6 +553,7 @@ class ModelSyncer:
             return
 
         xmlids = self._lookup_source_xmlids_bulk(model.name, unresolved)
+        xmlids = self._apply_xmlid_overrides_bulk(model.name, xmlids)
         lookup_candidates = {sid: xmlid for sid, xmlid in xmlids.items() if xmlid}
         if not lookup_candidates:
             return
@@ -506,7 +563,7 @@ class ModelSyncer:
             if dest_id:
                 existing_trans[source_id] = dest_id
                 model.translatable_ids.add(source_id)
-                self._external_translations[model.name][source_id] = dest_id
+                self._external_translations.setdefault(model.name, {})[source_id] = dest_id
 
     def _make_hash(self, vals: dict) -> str:
         _hash = hashlib.md5()
