@@ -62,7 +62,7 @@ class FieldMappingTests(unittest.TestCase):
 
     def test_field_rename_char_to_char(self):
         model = self._prepare_model(
-            {'model': 'res.partner', 'field_mapping': {'x_field': 'y_field'}},
+            {'model': 'res.partner', 'field_mappings': {'x_field': 'y_field'}},
             [
                 {'id': 1, 'model': 'res.partner', 'name': 'x_field', 'ttype': 'char', 'relation': False, 'readonly': False},
             ],
@@ -76,7 +76,7 @@ class FieldMappingTests(unittest.TestCase):
 
     def test_boolean_to_integer_conversion(self):
         model = self._prepare_model(
-            {'model': 'res.partner', 'field_mapping': {'flag': 'counter'}},
+            {'model': 'res.partner', 'field_mappings': {'flag': 'counter'}},
             [
                 {'id': 1, 'model': 'res.partner', 'name': 'flag', 'ttype': 'boolean', 'relation': False, 'readonly': False},
             ],
@@ -89,7 +89,7 @@ class FieldMappingTests(unittest.TestCase):
 
     def test_many2one_to_char_conversion(self):
         model = self._prepare_model(
-            {'model': 'res.partner', 'field_mapping': {'country_id': 'country_name'}},
+            {'model': 'res.partner', 'field_mappings': {'country_id': 'country_name'}},
             [
                 {'id': 1, 'model': 'res.partner', 'name': 'country_id', 'ttype': 'many2one', 'relation': 'res.country', 'readonly': False},
             ],
@@ -102,7 +102,7 @@ class FieldMappingTests(unittest.TestCase):
 
     def test_incompatible_mapping_is_skipped_with_log(self):
         model = self._prepare_model(
-            {'model': 'res.partner', 'field_mapping': {'child_ids': 'child_text'}},
+            {'model': 'res.partner', 'field_mappings': {'child_ids': 'child_text'}},
             [
                 {'id': 1, 'model': 'res.partner', 'name': 'child_ids', 'ttype': 'one2many', 'relation': 'res.partner.child', 'readonly': False},
             ],
@@ -115,6 +115,22 @@ class FieldMappingTests(unittest.TestCase):
         self.assertNotIn('child_text', mapped)
         log_messages = '\n'.join(captured.output)
         self.assertIn('cannot convert one2many to char', log_messages)
+
+    def test_legacy_field_mapping_key_emits_warning(self):
+        with self.assertLogs(logger, level='WARNING') as captured:
+            model = self._prepare_model(
+                {'model': 'res.partner', 'field_mapping': {'legacy': 'modern'}},
+                [
+                    {'id': 1, 'model': 'res.partner', 'name': 'legacy', 'ttype': 'char', 'relation': False, 'readonly': False},
+                ],
+                [
+                    {'id': 1, 'model': 'res.partner', 'name': 'modern', 'ttype': 'char', 'relation': False},
+                ],
+            )
+        log_body = '\n'.join(captured.output)
+        self.assertIn('deprecated', log_body)
+        mapped = model._map_fields({'id': 5, 'legacy': 'value'}, lambda *args, **kwargs: None)
+        self.assertEqual(mapped['modern'], 'value')
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ Main features:
 * Initial sync of all specified models/records
 * Subsequent syncs only sync changed records
 * Follow many2one relations to sync dependent records
-* Manual mapping table (id - id) for records that cannot be synced
+* Record ID mapping table (id -> id) for records that cannot be synced
   (eg. for company ids, country records, analytic account ids...)
 * Field-to-field mapping with automatic type conversion when possible
 * Automatically reuse destination records that share XML IDs with source data
@@ -123,17 +123,34 @@ Automatic reuse of records by XML ID is enabled by default. Set
 force manual mappings for module-provided data instead of relying on shared
 external identifiers.
 
-To remap fields between source and destination models, add a ``field_mapping``
+To remap fields between source and destination models, add a ``field_mappings``
 section inside the model definition in your YAML file::
 
   - model: res.partner
-    field_mapping:
+    field_mappings:
       x_field: y_field
 
 odoosync copies values from ``x_field`` into ``y_field`` and attempts safe
 conversions (booleans to integers, integers to floats, many2one relations to
 text, and more). When a conversion is not supported, the mapping is skipped and
 a warning is logged so the record continues untouched.
+
+To predefine explicit ID translations between environments (for example, for
+``res.company`` IDs that are created manually on each side), populate the
+``record_id_mappings`` block at the top level::
+
+  record_id_mappings:
+    forward:
+      res.company:
+        2: 1   # source id 2 should use destination id 1
+    reverse:
+      res.partner:
+        10: 99  # when syncing in reverse, reuse source id 99 for dest id 10
+
+Both ``forward`` and ``reverse`` sections are optional. During a transition
+period the legacy ``manual_mapping`` and ``reverse_manual_mapping`` keys are
+still accepted but emit deprecation warnings; update YAML files to the new
+structure to silence them.
 
 Programmatic usage
 ------------------

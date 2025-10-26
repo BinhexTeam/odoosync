@@ -103,8 +103,8 @@ class XmlIdLookupTests(unittest.TestCase):
         syncer.dry_run = False
         syncer.batch_size = 1000
         syncer.auto_xmlid_lookup = True
-        syncer.manual_mapping = {}
-        syncer.reverse_manual_mapping = {}
+        syncer.record_id_map_forward = {}
+        syncer.record_id_map_reverse = {}
         syncer._external_translations = defaultdict(dict)
         syncer._source_xmlid_cache = defaultdict(dict)
         syncer._dest_xmlid_cache = defaultdict(dict)

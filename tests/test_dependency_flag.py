@@ -104,8 +104,8 @@ class DependencyFlagTests(unittest.TestCase):
             search=lambda *args, **kwargs: [],
             read=lambda *args, **kwargs: []
         )
-        syncer.manual_mapping = {}
-        syncer.reverse_manual_mapping = {}
+        syncer.record_id_map_forward = {}
+        syncer.record_id_map_reverse = {}
         return syncer, fake_model
 
     def test_dependencies_skipped_when_flag_disabled(self):

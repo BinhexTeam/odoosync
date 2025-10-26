@@ -27,8 +27,9 @@ class ModelSyncer:
             set_level(logging.DEBUG)
         logger.info("-----------START-----------")
         logger.debug("Created ModelSyncer instance...")
-        self.manual_mapping = _struct.get("manual_mapping", {})
-        self.reverse_manual_mapping = _struct.get("reverse_manual_mapping", {})
+        forward_id_map, reverse_id_map = self._parse_record_id_mappings(_struct)
+        self.record_id_map_forward = forward_id_map
+        self.record_id_map_reverse = reverse_id_map
         self.source_timestamp = _timestamps.get("source")
         self.dest_timestamp = _timestamps.get("target")
         default_netrc_path = self.options.get("netrc_path")
@@ -77,6 +78,81 @@ class ModelSyncer:
             logger.debug("Using batch size %s for record retrieval", self.batch_size)
         else:
             logger.debug("Batch size disabled; fetching records in a single request")
+
+    def _parse_record_id_mappings(self, struct: dict) -> Tuple[Dict[str, Dict[int, int]], Dict[str, Dict[int, int]]]:
+        mapping_cfg = struct.get("record_id_mappings") or {}
+        if not isinstance(mapping_cfg, dict):
+            logger.warning("Ignoring invalid `record_id_mappings` value; expected a mapping but got %r", mapping_cfg)
+            mapping_cfg = {}
+
+        forward_cfg = mapping_cfg.get("forward") if isinstance(mapping_cfg, dict) else {}
+        reverse_cfg = mapping_cfg.get("reverse") if isinstance(mapping_cfg, dict) else {}
+
+        if forward_cfg is not None and not isinstance(forward_cfg, dict):
+            logger.warning(
+                "Ignoring invalid `record_id_mappings.forward`; expected a mapping but got %r",
+                forward_cfg,
+            )
+            forward_cfg = {}
+        if reverse_cfg is not None and not isinstance(reverse_cfg, dict):
+            logger.warning(
+                "Ignoring invalid `record_id_mappings.reverse`; expected a mapping but got %r",
+                reverse_cfg,
+            )
+            reverse_cfg = {}
+
+        legacy_forward = struct.get("manual_mapping")
+        legacy_reverse = struct.get("reverse_manual_mapping")
+
+        used_legacy_keys = False
+
+        if forward_cfg is None:
+            forward_cfg = legacy_forward or {}
+            if legacy_forward is not None:
+                used_legacy_keys = True
+        elif legacy_forward:
+            logger.warning(
+                "Ignoring legacy `manual_mapping` because `record_id_mappings.forward` is provided."
+            )
+
+        if reverse_cfg is None:
+            reverse_cfg = legacy_reverse or {}
+            if legacy_reverse is not None:
+                used_legacy_keys = True
+        elif legacy_reverse:
+            logger.warning(
+                "Ignoring legacy `reverse_manual_mapping` because `record_id_mappings.reverse` is provided."
+            )
+
+        if used_legacy_keys:
+            logger.warning(
+                "Configuration keys `manual_mapping`/`reverse_manual_mapping` are deprecated. "
+                "Use `record_id_mappings.forward`/`record_id_mappings.reverse` instead."
+            )
+
+        forward_map: Dict[str, Dict[int, int]] = {}
+        for model_name, mapping in (forward_cfg or {}).items():
+            if not isinstance(mapping, dict):
+                logger.warning(
+                    "Skipping forward record_id mapping for %s; expected a mapping but got %r",
+                    model_name,
+                    mapping,
+                )
+                continue
+            forward_map[model_name] = dict(mapping or {})
+
+        reverse_map: Dict[str, Dict[int, int]] = {}
+        for model_name, mapping in (reverse_cfg or {}).items():
+            if not isinstance(mapping, dict):
+                logger.warning(
+                    "Skipping reverse record_id mapping for %s; expected a mapping but got %r",
+                    model_name,
+                    mapping,
+                )
+                continue
+            reverse_map[model_name] = dict(mapping or {})
+
+        return forward_map, reverse_map
 
     def _get_xmlid(self, model_name, _id):
         return "{}_{}".format(model_name.replace(".", "_"), _id)
@@ -169,7 +245,7 @@ class ModelSyncer:
 
     def _find_dest_id(self, model_name, source_id):
         model = self.models_by_name.get(model_name)
-        dest_id = self.manual_mapping.get(model_name, {}).get(source_id)
+        dest_id = self.record_id_map_forward.get(model_name, {}).get(source_id)
         if dest_id and model:
             model.trans[source_id] = dest_id
             model.translatable_ids.add(source_id)
@@ -194,7 +270,7 @@ class ModelSyncer:
 
     def _find_source_id(self, model_name, dest_id):
         model = self.reverse_models_by_name.get(model_name)
-        source_id = self.reverse_manual_mapping.get(model_name, {}).get(dest_id)
+        source_id = self.record_id_map_reverse.get(model_name, {}).get(dest_id)
         if not source_id:
             source_id = dest_id and model and model.trans.get(dest_id)
         logger.debug("dest %s[%s] -> source %s[%s]", model_name, dest_id, model and model.name, source_id)
@@ -360,13 +436,41 @@ class ModelSyncer:
             result[source_id] = cache.get((module, name))
         return result
 
+    @property
+    def manual_mapping(self) -> Dict[str, Dict[int, int]]:
+        logger.warning(
+            "Accessing ModelSyncer.manual_mapping is deprecated; use `record_id_map_forward` instead."
+        )
+        return self.record_id_map_forward
+
+    @manual_mapping.setter
+    def manual_mapping(self, value: Optional[dict]) -> None:
+        logger.warning(
+            "Assigning to ModelSyncer.manual_mapping is deprecated; use `record_id_map_forward` instead."
+        )
+        self.record_id_map_forward = dict(value or {})
+
+    @property
+    def reverse_manual_mapping(self) -> Dict[str, Dict[int, int]]:
+        logger.warning(
+            "Accessing ModelSyncer.reverse_manual_mapping is deprecated; use `record_id_map_reverse` instead."
+        )
+        return self.record_id_map_reverse
+
+    @reverse_manual_mapping.setter
+    def reverse_manual_mapping(self, value: Optional[dict]) -> None:
+        logger.warning(
+            "Assigning to ModelSyncer.reverse_manual_mapping is deprecated; use `record_id_map_reverse` instead."
+        )
+        self.record_id_map_reverse = dict(value or {})
+
     def _prefetch_destination_ids(self, model: OdooModel, records: List[dict]) -> None:
         if not records or not model.name:
             return
         if not hasattr(model, "trans") or not hasattr(model, "translatable_ids"):
             return
 
-        manual_map = self.manual_mapping.get(model.name, {})
+        manual_map = self.record_id_map_forward.get(model.name, {})
         existing_trans = model.trans
         unresolved: List[int] = []
 
@@ -676,7 +780,7 @@ class ModelSyncer:
                 self.source_timestamp,
                 self.models,
                 False,
-                self.manual_mapping,
+                self.record_id_map_forward,
                 self.models_by_name,
                 self._add_translations,
             ),
@@ -686,7 +790,7 @@ class ModelSyncer:
                 self.dest_timestamp,
                 self.reverse_models,
                 True,
-                self.reverse_manual_mapping,
+                self.record_id_map_reverse,
                 self.reverse_models_by_name,
                 self._add_reverse_translations,
             ),

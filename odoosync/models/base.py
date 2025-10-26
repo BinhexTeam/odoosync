@@ -7,6 +7,8 @@ logger = get_logger(__name__)
 
 INTERNAL_RUNTIME_FIELDS: Tuple[str, ...] = ("__sfit_dep",)
 
+_VALUE_MAPPING_UNSET = object()
+
 DEFAULT_EXCLUDED_FIELDS: List[str] = [
     "id",
     "__last_update",
@@ -21,15 +23,14 @@ class OdooModel:
     """Abstraction of an Odoo model."""
 
     def __init__(self, model_dict: dict):
+        self.name: Optional[str] = model_dict.get("model")
         self.fields: List[str] = []
         self.many2onefields: Dict[str, str] = {}
         self.external_relation_fields: Set[str] = set()
-        self.field_mapping: Dict[str, str] = dict(model_dict.get("field_mapping", {}) or {})
         self.dest_fields: List[str] = []
         self.field_specs: Dict[str, dict] = {}
         self.records: List[dict] = []
         self.record_ids: Set[int] = set()
-        self.name: Optional[str] = model_dict.get("model")
         self.domain = model_dict.get("domain", [])
         self.no_domain = model_dict.get("no_domain")
         self.context = model_dict.get("context", {})
@@ -38,6 +39,8 @@ class OdooModel:
         self.reverse = bool(model_dict.get("reverse"))
         self.trans: Dict[int, int] = {}
         self.translatable_ids: Set[int] = set()
+        self.field_mappings: Dict[str, str] = self._load_field_mappings(model_dict)
+        self.value_mappings = self._normalize_value_mappings(model_dict.get("value_mappings"))
 
     def load_recs(self, odoo, _ids: Iterable[int], dep: bool = False, chunk_size: Optional[int] = None) -> List[dict]:
         """Loads records into this model."""
@@ -115,6 +118,37 @@ class OdooModel:
             sorted_records = records
         self.records = sorted_records
 
+    def _load_field_mappings(self, model_dict: dict) -> Dict[str, str]:
+        field_mappings = model_dict.get("field_mappings")
+        legacy_field_mapping = model_dict.get("field_mapping")
+        used_legacy_key = False
+
+        if field_mappings is None:
+            field_mappings = legacy_field_mapping or {}
+            if legacy_field_mapping is not None:
+                used_legacy_key = True
+        elif legacy_field_mapping:
+            logger.warning(
+                "Ignoring legacy `field_mapping` for %s because `field_mappings` is provided.",
+                self.name or "<unknown>",
+            )
+
+        if used_legacy_key:
+            logger.warning(
+                "Configuration key `field_mapping` for %s is deprecated; use `field_mappings` instead.",
+                self.name or "<unknown>",
+            )
+
+        if field_mappings and not isinstance(field_mappings, dict):
+            logger.warning(
+                "Ignoring invalid field mappings for %s; expected a mapping but got %r.",
+                self.name or "<unknown>",
+                field_mappings,
+            )
+            return {}
+
+        return dict(field_mappings or {})
+
     def determine_fields(
         self,
         odoo,
@@ -159,10 +193,10 @@ class OdooModel:
                 continue
             if name in self.excluded_fields:
                 continue
-            if relation and ttype not in ("many2one",) and name not in self.field_mapping:
+            if relation and ttype not in ("many2one",) and name not in self.field_mappings:
                 continue
 
-            target_name = self.field_mapping.get(name, name)
+            target_name = self.field_mappings.get(name, name)
 
             if target_name not in dest_field_names:
                 if target_name != name:
@@ -230,7 +264,8 @@ class OdooModel:
             if ok:
                 if message:
                     logger.warning(message)
-                mapped[dest_field] = converted
+                mapped_value = self._apply_value_mapping(source_field, converted)
+                mapped[dest_field] = mapped_value
             else:
                 logger.warning(
                     "Skipping field mapping %s[%s] -> %s: %s",
@@ -346,6 +381,65 @@ class OdooModel:
             return value, True, None
 
         return None, False, f"cannot convert {source_type} to {dest_type}"
+
+    def _normalize_value_mappings(self, raw_mappings: Optional[dict]) -> Dict[str, dict]:
+        normalized: Dict[str, dict] = {}
+        if not raw_mappings:
+            return normalized
+        for field_name, config in raw_mappings.items():
+            if isinstance(config, dict):
+                # Extract flags
+                case_insensitive = bool(config.get("case_insensitive") or config.get("__case_insensitive__"))
+                default = _VALUE_MAPPING_UNSET
+                if "default" in config:
+                    default = config["default"]
+                elif "__default__" in config:
+                    default = config["__default__"]
+
+                values = config.get("values")
+                if values is None:
+                    reserved_keys = {"values", "default", "__default__", "case_insensitive", "__case_insensitive__"}
+                    values = {k: v for k, v in config.items() if k not in reserved_keys}
+
+                value_map: Dict[object, object] = {}
+                if isinstance(values, dict):
+                    for raw_key, mapped_value in values.items():
+                        key = raw_key
+                        if case_insensitive and isinstance(raw_key, str):
+                            key = raw_key.lower()
+                        value_map[key] = mapped_value
+
+                normalized[field_name] = {
+                    "values": value_map,
+                    "default": default,
+                    "case_insensitive": case_insensitive,
+                }
+            else:
+                normalized[field_name] = {"constant": config}
+        return normalized
+
+    def _apply_value_mapping(self, source_field: str, value):
+        mapping_config = self.value_mappings.get(source_field)
+        if not mapping_config:
+            return value
+
+        if "constant" in mapping_config:
+            return mapping_config["constant"]
+
+        case_insensitive = mapping_config.get("case_insensitive", False)
+        lookup_value = value
+        if case_insensitive and isinstance(value, str):
+            lookup_value = value.lower()
+
+        values_map: Dict[object, object] = mapping_config.get("values", {})
+        if lookup_value in values_map:
+            return values_map[lookup_value]
+
+        default_value = mapping_config.get("default", _VALUE_MAPPING_UNSET)
+        if default_value is not _VALUE_MAPPING_UNSET:
+            return default_value
+
+        return value
 
 
 __all__ = ["OdooModel", "INTERNAL_RUNTIME_FIELDS", "DEFAULT_EXCLUDED_FIELDS"]

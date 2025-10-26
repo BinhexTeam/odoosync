@@ -2,18 +2,24 @@ source:
   host: source.example.com
   port: 443
   database: example1
-  ssl: yes  # use HTTPS
-  # netrc_path: /etc/odoo/source.netrc  # Optional: path to credentials file
+  ssl: yes  # enable HTTPS
+  # netrc_path: /etc/odoo/source.netrc  # Optional: credentials path per endpoint
 
 target:
   host: localhost
   port: 8069
   database: test
-  # netrc_path: /etc/odoo/target.netrc  # Optional: path to credentials file
+  # netrc_path: /etc/odoo/target.netrc  # Optional: credentials path per endpoint
 
-manual_mapping:
-  res.company:
-    {2: 1}
+record_id_mappings:
+  forward:
+    res.company:
+      2: 1  # use dest company 1 for source company 2
+    res.users:
+      7: 3  # pin a specific user mapping for forward sync
+  reverse:
+    res.partner:
+      99: 10  # when reverse syncing, reuse source id 99 for dest id 10
 
 options:
   prefix: '__export_sfit__'  # Use a custom prefix for xmlids
@@ -22,25 +28,68 @@ options:
   auto_xmlid_lookup: True  # Reuse records that share xmlids on the target
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
   # sync_dependencies: true  # Optional: create related records outside the domain selection
+  # batch_size: 500  # Optional: override default 1000 chunking
 
 models:
 
-# Partner records: sync only customers belonging to our company 2
 - model: res.partner
-  domain: [['customers', '=', True], ['company_id', '=', 2]]
-  field_mapping:
-    x_field: y_field  # Optional: rename source field to destination field
+  domain: [['customer_rank', '>', 0], ['company_id', '=', 2]]
+  field_mappings:
+    x_field: y_field        # rename custom field when the destination uses y_field
+    email_formatted: email  # flatten formatted email into the standard email field
+  value_mappings:
+    country_id:
+      type: many2one
+      by_xmlid: base.es   # fallback XMLID lookup when manual match fails
+    customer_rank:
+      type: integer
+      map:
+        0: 0
+        1: 10
+        2: 20              # scale customer rank on write
+    lang:
+      type: selection
+      default: es_ES        # use a default when value missing
+      map:
+        en_US: es_ES
+        nl_NL: es_ES
   excluded_fields:
-  - signup_url  # exclude a field, sync all others
-  context: {'active_test': False}  # Sync inactive partners too
+  - signup_url               # skip marketing signup URL
+  context: {'active_test': False}
 
-# Partner categories: sync only if a partner depends on it
-- model: res.partner.category
-  no_domain: True
-
-# Reverse partner sync: sync only state_id
-- model: res.partner
+- model: product.template
+  domain: [['sale_ok', '=', True]]
   included_fields:
-  - state_id 
-  reverse: True 
+  - list_price
+  - standard_price
+  - tax_ids
+  field_mappings:
+    x_barcode: barcode
+  value_mappings:
+    sale_ok:
+      type: boolean
+      map:
+        false: false
+        true: true
+    type:
+      type: selection
+      map:
+        consumable: product
+  excluded_fields:
+  - message_ids
+
+- model: res.partner.category
+  no_domain: True  # pull every category referenced by dependencies
+
+- model: res.partner
+  reverse: True
+  included_fields:
+  - state_id
+  - email
+  value_mappings:
+    state_id:
+      type: many2one
+      map:
+        NY: 'US-33'
+  context: {'active_test': False}
 

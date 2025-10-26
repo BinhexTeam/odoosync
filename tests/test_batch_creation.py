@@ -62,8 +62,8 @@ class BatchCreationTests(unittest.TestCase):
         syncer.dry_run = False
         syncer.sync_dependencies = True
         syncer.auto_xmlid_lookup = False
-        syncer.manual_mapping = {}
-        syncer.reverse_manual_mapping = {}
+        syncer.record_id_map_forward = {}
+        syncer.record_id_map_reverse = {}
         syncer._external_translations = defaultdict(dict)
         syncer._source_xmlid_cache = defaultdict(dict)
         syncer._dest_xmlid_cache = defaultdict(dict)

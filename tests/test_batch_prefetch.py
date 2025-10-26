@@ -63,7 +63,8 @@ class StubModelData:
 class BatchedLookupTests(unittest.TestCase):
     def _build_syncer(self, batch_size=2):
         syncer = ModelSyncer.__new__(ModelSyncer)
-        syncer.manual_mapping = {}
+        syncer.record_id_map_forward = {}
+        syncer.record_id_map_reverse = {}
         syncer._external_translations = defaultdict(dict)
         syncer._source_xmlid_cache = defaultdict(dict)
         syncer._dest_xmlid_cache = defaultdict(dict)
