@@ -874,7 +874,7 @@ class ModelSyncer:
                     for index, source_id in enumerate(batch_source_ids):
                         single_payload = batch_payload[index] if index < len(batch_payload) else {}
                         dest_id = self._create_record_with_retry(
-                            odoo,
+                            odoo_instance,
                             model,
                             single_payload,
                             source_id,
