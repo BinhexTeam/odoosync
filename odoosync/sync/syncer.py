@@ -1,6 +1,7 @@
 import hashlib
 import logging
 from collections import defaultdict
+from itertools import combinations
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import odoorpc
@@ -208,6 +209,160 @@ class ModelSyncer:
             else:
                 adjusted[source_id] = xmlid
         return adjusted
+
+    def _create_record_with_retry(
+        self,
+        odoo_instance: OdooInstance,
+        model: OdooModel,
+        payload: dict,
+        source_id: int,
+        add_dest_id_function,
+        create_xmlid_function,
+    ) -> Optional[int]:
+        obj = odoo_instance.odoo.env[model.name]
+        base_payload = dict(payload or {})
+        try:
+            dest_id = obj.create(base_payload)
+            if isinstance(dest_id, list):
+                dest_id = dest_id[0] if dest_id else None
+            if dest_id:
+                logger.info(str(dest_id))
+                add_dest_id_function(model.name, source_id, dest_id)
+                create_xmlid_function(model.name, source_id, dest_id)
+            return dest_id
+        except odoorpc.error.RPCError as exc:
+            dest_id = self._retry_create_with_field_subsets(
+                odoo_instance,
+                model,
+                base_payload,
+                source_id,
+                exc,
+            )
+            if dest_id:
+                logger.info(str(dest_id))
+                add_dest_id_function(model.name, source_id, dest_id)
+                create_xmlid_function(model.name, source_id, dest_id)
+            return dest_id
+
+    def _retry_create_with_field_subsets(
+        self,
+        odoo_instance: OdooInstance,
+        model: OdooModel,
+        payload: Dict,
+        source_id: int,
+        initial_exc: odoorpc.error.RPCError,
+    ) -> Optional[int]:
+        self._record_retry_event(
+            odoo_instance,
+            model.name,
+            source_id,
+            (),
+            f"initial failure: {initial_exc}",
+            success=False,
+        )
+
+        retry_cfg = getattr(model, "retry_on_create", None)
+        if not retry_cfg:
+            return None
+
+        candidate_fields = [field for field in retry_cfg.get("fields", []) if field in payload]
+        if not candidate_fields:
+            self._record_retry_event(
+                odoo_instance,
+                model.name,
+                source_id,
+                (),
+                "retry fields not present in payload",
+                success=False,
+            )
+            return None
+
+        max_subset = retry_cfg.get("max_subset")
+        if max_subset is None:
+            max_subset = len(candidate_fields)
+        max_subset = max(1, min(len(candidate_fields), max_subset))
+
+        obj = odoo_instance.odoo.env[model.name]
+        for subset_size in range(1, max_subset + 1):
+            for subset in combinations(candidate_fields, subset_size):
+                trimmed_payload = {key: value for key, value in payload.items() if key not in subset}
+                try:
+                    dest_id = obj.create(trimmed_payload)
+                    if isinstance(dest_id, list):
+                        dest_id = dest_id[0] if dest_id else None
+                except odoorpc.error.RPCError as subset_exc:
+                    self._record_retry_event(
+                        odoo_instance,
+                        model.name,
+                        source_id,
+                        subset,
+                        str(subset_exc),
+                        success=False,
+                    )
+                    continue
+                self._record_retry_event(
+                    odoo_instance,
+                    model.name,
+                    source_id,
+                    subset,
+                    f"success with dest_id={dest_id}",
+                    success=True,
+                    dest_id=dest_id,
+                )
+                return dest_id
+
+        self._record_retry_event(
+            odoo_instance,
+            model.name,
+            source_id,
+            tuple(candidate_fields[:max_subset]),
+            "exhausted retry combinations without success",
+            success=False,
+        )
+        return None
+
+    def _record_retry_event(
+        self,
+        odoo_instance: OdooInstance,
+        model_name: str,
+        source_id: int,
+        removed_fields: Iterable[str],
+        message: str,
+        success: bool,
+        dest_id: Optional[int] = None,
+    ) -> None:
+        removed_list = list(removed_fields) if removed_fields else []
+        removed_repr = ", ".join(removed_list) if removed_list else "none"
+        base_message = (
+            f"Create {'succeeded' if success else 'failed'} for {model_name} (source_id={source_id}) "
+            f"after dropping fields [{removed_repr}]"
+        )
+        if dest_id is not None:
+            base_message = f"{base_message}; dest_id={dest_id}"
+        if message:
+            base_message = f"{base_message}: {message}"
+
+        if success:
+            logger.info(base_message)
+            level = "INFO"
+        else:
+            logger.error(base_message)
+            level = "ERROR"
+
+        try:
+            log_model = odoo_instance.odoo.env["ir.logging"]
+            log_model.create({
+                "name": "odoosync.retry",
+                "type": "server",
+                "level": level,
+                "dbname": getattr(odoo_instance, "database", ""),
+                "message": base_message,
+                "path": "odoosync",
+                "func": "_create_record_with_retry",
+                "line": 0,
+            })
+        except Exception:
+            logger.debug("Failed to push retry event to destination log", exc_info=True)
 
     def _get_xmlid(self, model_name, _id):
         return "{}_{}".format(model_name.replace(".", "_"), _id)
@@ -611,13 +766,14 @@ class ModelSyncer:
         if not dest_id:
             logger.info("creating record from source %s[%s]..", model.name, source_id)
             if not self.dry_run:
-                try:
-                    dest_id = obj.create(vals)
-                    logger.info(str(dest_id))
-                    add_dest_id_function(model.name, source_id, dest_id)
-                    create_xmlid_function(model.name, source_id, dest_id)
-                except odoorpc.error.RPCError as exc:
-                    logger.error("Creating %s failed: %s", model.name, str(exc))
+                dest_id = self._create_record_with_retry(
+                    odoo,
+                    model,
+                    vals,
+                    source_id,
+                    add_dest_id_function,
+                    create_xmlid_function,
+                )
 
     def _sync_one_model(self, model: OdooModel) -> None:
         logger.debug("Totally %s %s records considered for sync...", len(model.records), model.name)
@@ -704,6 +860,7 @@ class ModelSyncer:
                 return []
             logger.info("creating %s records from sources %s", len(batch_source_ids), batch_source_ids)
             dest_ids: List[int] = []
+            created_sources_local: List[int] = []
             if not self.dry_run:
                 try:
                     payload = batch_payload[0] if len(batch_payload) == 1 else batch_payload
@@ -713,8 +870,21 @@ class ModelSyncer:
                     else:
                         dest_ids = [created]
                 except odoorpc.error.RPCError as exc:
-                    logger.error("Creating %s failed: %s", model.name, str(exc))
-                    return
+                    logger.error("Creating %s failed (batch fallback): %s", model.name, str(exc))
+                    for index, source_id in enumerate(batch_source_ids):
+                        single_payload = batch_payload[index] if index < len(batch_payload) else {}
+                        dest_id = self._create_record_with_retry(
+                            odoo,
+                            model,
+                            single_payload,
+                            source_id,
+                            add_dest_id_function,
+                            create_xmlid_function,
+                        )
+                        if dest_id:
+                            created_sources_local.append(source_id)
+                        pending_create.pop(source_id, None)
+                    return created_sources_local
                 if len(dest_ids) != len(batch_source_ids):
                     logger.warning(
                         "Mismatch between created IDs (%s) and source batch (%s) for %s",
@@ -722,7 +892,7 @@ class ModelSyncer:
                         len(batch_source_ids),
                         model.name,
                     )
-            created = []
+            created = created_sources_local
             for index, source_id in enumerate(batch_source_ids):
                 dest_id = dest_ids[index] if index < len(dest_ids) else None
                 if dest_id:

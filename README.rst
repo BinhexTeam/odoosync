@@ -152,6 +152,20 @@ map the field and attach a ``value_mappings`` block::
 This keeps legacy ``type`` values for other records untouched while marking
 only ``product`` entries as storable.
 
+If Odoo rejects record creation because of validation errors (for example an
+invalid VAT number), declare a ``retry_on_create`` strategy. odoosync will log
+the failure, drop the listed fields in every combination up to
+``max_subset`` (default: the whole list), and retry before moving on::
+
+  retry_on_create:
+    fields:
+      - vat
+      - x_legacy_flag
+    max_subset: 2
+
+Every attempt is recorded both in the CLI output and in ``ir.logging`` on the
+target database so operators can review which fields were skipped.
+
 To predefine explicit ID translations between environments (for example, for
 ``res.company`` IDs that are created manually on each side), populate the
 ``record_id_mappings`` block at the top level::

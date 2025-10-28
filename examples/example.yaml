@@ -52,6 +52,11 @@ models:
   excluded_fields:
   - signup_url               # skip marketing signup URL
   context: {'active_test': False}
+  retry_on_create:
+    fields:
+      - vat
+      - x_legacy_flag
+    max_subset: 2
 
 - model: product.template
   domain: [['sale_ok', '=', True]]

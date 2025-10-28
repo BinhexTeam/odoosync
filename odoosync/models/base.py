@@ -41,6 +41,7 @@ class OdooModel:
         self.translatable_ids: Set[int] = set()
         self.field_mappings: Dict[str, str] = self._load_field_mappings(model_dict)
         self.value_mappings = self._normalize_value_mappings(model_dict.get("value_mappings"))
+        self.retry_on_create = self._parse_retry_on_create(model_dict.get("retry_on_create"))
 
     def load_recs(self, odoo, _ids: Iterable[int], dep: bool = False, chunk_size: Optional[int] = None) -> List[dict]:
         """Loads records into this model."""
@@ -148,6 +149,60 @@ class OdooModel:
             return {}
 
         return dict(field_mappings or {})
+
+    def _parse_retry_on_create(self, config: Optional[dict]) -> Optional[dict]:
+        if not config:
+            return None
+        if not isinstance(config, dict):
+            logger.warning(
+                "Ignoring invalid retry_on_create configuration for %s; expected a mapping but got %r.",
+                self.name or "<unknown>",
+                config,
+            )
+            return None
+
+        raw_fields = config.get("fields")
+        if not isinstance(raw_fields, (list, tuple)):
+            logger.warning(
+                "Ignoring retry_on_create for %s; `fields` must be a list of field names.",
+                self.name or "<unknown>",
+            )
+            return None
+
+        fields: List[str] = []
+        for entry in raw_fields:
+            if isinstance(entry, str) and entry:
+                fields.append(entry)
+            else:
+                logger.warning(
+                    "Skipping non-string retry field %r for %s.",
+                    entry,
+                    self.name or "<unknown>",
+                )
+
+        if not fields:
+            return None
+
+        max_subset = config.get("max_subset")
+        if max_subset is not None:
+            try:
+                max_subset = int(max_subset)
+                if max_subset <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid max_subset %r for retry_on_create on %s; falling back to len(fields).",
+                    config.get("max_subset"),
+                    self.name or "<unknown>",
+                )
+                max_subset = None
+
+        result = {
+            "fields": fields,
+        }
+        if max_subset is not None:
+            result["max_subset"] = max_subset
+        return result
 
     def determine_fields(
         self,
