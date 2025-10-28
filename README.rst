@@ -110,6 +110,13 @@ Automatic reuse of records by XML ID is enabled by default. Set
 force manual mappings for module-provided data instead of relying on shared
 external identifiers.
 
+Control the verbosity of odoosync by setting ``options.log_level`` (``DEBUG``,
+``INFO``, ``WARNING``, ``ERROR``) or by muting specific severities with
+``options.mute_log_levels`` (for example ``["INFO"]``). These options work
+alongside ``options.debug`` so you can tailor the output to the run at hand. Progress
+messages are always shown, even when their level is muted, so long-running runs remain
+observable.
+
 To remap fields between source and destination models, add a ``field_mappings``
 section inside the model definition in your YAML file::
 
@@ -165,6 +172,9 @@ the failure, drop the listed fields in every combination up to
 
 Every attempt is recorded both in the CLI output and in ``ir.logging`` on the
 target database so operators can review which fields were skipped.
+
+odoosync also reports per-model progress, including planned batches and
+remaining records, to make it easier to monitor long-running synchronisations.
 
 To predefine explicit ID translations between environments (for example, for
 ``res.company`` IDs that are created manually on each side), populate the

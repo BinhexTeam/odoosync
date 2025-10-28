@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import math
 from collections import defaultdict
 from itertools import combinations
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -7,10 +8,35 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 import odoorpc
 
 from ..connection import OdooInstance
-from ..core import get_logger, set_level
+from ..core import get_logger, set_level, set_muted_levels
 from ..models import INTERNAL_RUNTIME_FIELDS, OdooModel
 
 logger = get_logger(__name__)
+
+
+class ProgressTracker:
+    def __init__(self, model_name: str, total: int) -> None:
+        self.model_name = model_name
+        self.total = total
+        self.completed = 0
+        self._log_interval = 1 if total <= 0 else max(1, total // 10)
+        self._log_extra = {"odoosync_progress": True}
+
+    def advance(self, step: int = 1, context: Optional[str] = None) -> None:
+        if self.total <= 0:
+            return
+        self.completed = min(self.total, self.completed + max(0, step))
+        should_log = self.completed == self.total or self.completed % self._log_interval == 0
+        if should_log:
+            remaining = self.total - self.completed
+            percent = (self.completed / self.total) * 100
+            message = (
+                f"Progress {self.model_name}: {self.completed}/{self.total} "
+                f"({percent:.1f}% complete, remaining={remaining})"
+            )
+            if context:
+                message = f"{message} | {context}"
+            logger.info(message, extra=self._log_extra.copy())
 
 
 class ModelSyncer:
@@ -19,13 +45,33 @@ class ModelSyncer:
     def __init__(self, _struct: dict, _timestamps: dict, options: Optional[dict] = None):
         self.options = _struct.get("options", {})
         self.dry_run = self.options.get("dry_run")
-        self.debug = self.options.get("debug")
+        self.debug = bool(self.options.get("debug"))
         self.sync_dependencies = bool(self.options.get("sync_dependencies"))
         self.force_sync = bool(self.options.get("force_sync"))
 
         self.auto_xmlid_lookup = bool(self.options.get("auto_xmlid_lookup", True))
-        if self.debug:
+        log_level_opt = self.options.get("log_level")
+        level_applied = False
+        if log_level_opt:
+            level_name = str(log_level_opt).upper()
+            level_value = getattr(logging, level_name, None)
+            if isinstance(level_value, int):
+                set_level(level_value)
+                level_applied = True
+            else:
+                logger.warning("Unknown log_level %r; keeping default", log_level_opt)
+        if not level_applied and self.debug:
             set_level(logging.DEBUG)
+
+        mute_levels_opt = self.options.get("mute_log_levels") or self.options.get("muted_log_levels")
+        if mute_levels_opt is not None:
+            if isinstance(mute_levels_opt, (list, tuple)):
+                set_muted_levels(mute_levels_opt)
+            else:
+                logger.warning("mute_log_levels must be a list of level names; got %r", mute_levels_opt)
+                set_muted_levels([])
+        else:
+            set_muted_levels([])
         logger.info("-----------START-----------")
         logger.debug("Created ModelSyncer instance...")
         forward_id_map, reverse_id_map, xmlid_overrides = self._parse_record_id_mappings(_struct)
@@ -793,6 +839,22 @@ class ModelSyncer:
             self._prefetch_destination_ids(model, model.records)
         obj = odoo_instance.odoo.env[model.name]
 
+        total_records = len(model.records)
+        if self.batch_size:
+            batches = math.ceil(total_records / self.batch_size) if total_records else 0
+            batch_descriptor = self.batch_size
+        else:
+            batches = 1 if total_records else 0
+            batch_descriptor = "all"
+        logger.info(
+            "Sync plan for %s: %s records across %s batch(es) (batch_size=%s)",
+            model.name,
+            total_records,
+            batches,
+            batch_descriptor,
+        )
+        progress = ProgressTracker(model.name, total_records)
+
         to_update = {}
         to_create = []
         dest_ids = []
@@ -804,6 +866,7 @@ class ModelSyncer:
                     model.name,
                     record.get("id"),
                 )
+                progress.advance(context=f"skipped dependency source_id={source_id}")
                 continue
             dest_id = find_dest_id_function(model.name, source_id)
             if dest_id:
@@ -884,6 +947,7 @@ class ModelSyncer:
                         if dest_id:
                             created_sources_local.append(source_id)
                         pending_create.pop(source_id, None)
+                    progress.advance(len(batch_source_ids))
                     return created_sources_local
                 if len(dest_ids) != len(batch_source_ids):
                     logger.warning(
@@ -901,6 +965,7 @@ class ModelSyncer:
                     create_xmlid_function(model.name, source_id, dest_id)
                     created.append(source_id)
                 pending_create.pop(source_id, None)
+            progress.advance(len(batch_source_ids))
             return created
 
         batch_payload: List[dict] = []
@@ -955,6 +1020,18 @@ class ModelSyncer:
                     obj.write(dest_id, vals)
             except odoorpc.error.RPCError as exc:
                 logger.error("Writing %s[%s] failed: %s", model.name, dest_id, str(exc))
+
+        if to_update:
+            progress.advance(len(to_update))
+
+        if total_records:
+            logger.info(
+                "%s sync complete: %s/%s records processed",
+                model.name,
+                progress.completed,
+                progress.total,
+                extra={"odoosync_progress": True},
+            )
 
     def _load_dependencies_of_records(self, odoo_instance, loaded, other_models, add_translations):
         count = sum(len(recs) for recs in loaded.values())

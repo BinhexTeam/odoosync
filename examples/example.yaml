@@ -29,6 +29,9 @@ options:
   dry_run: False  # Run, but dont write to target database
   debug: True     # Show debug messages
   auto_xmlid_lookup: True  # Reuse records that share xmlids on the target
+  log_level: INFO  # Optional: override the logging threshold (DEBUG, INFO, WARNING, ERROR)
+  mute_log_levels:
+    - INFO  # Optional: drop selected severities from the output (progress stays visible)
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
   # sync_dependencies: true  # Optional: create related records outside the domain selection
   # batch_size: 500  # Optional: override default 1000 chunking
