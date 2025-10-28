@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 import odoorpc
 
 from ..connection import OdooInstance
-from ..core import get_logger, set_level, set_muted_levels
+from ..core import PROGRESS_LEVEL, get_logger, set_level, set_muted_levels
 from ..models import INTERNAL_RUNTIME_FIELDS, OdooModel
 
 logger = get_logger(__name__)
@@ -36,7 +36,7 @@ class ProgressTracker:
             )
             if context:
                 message = f"{message} | {context}"
-            logger.info(message, extra=self._log_extra.copy())
+            logger.log(PROGRESS_LEVEL, message, extra=self._log_extra.copy())
 
 
 class ModelSyncer:
@@ -1025,7 +1025,8 @@ class ModelSyncer:
             progress.advance(len(to_update))
 
         if total_records:
-            logger.info(
+            logger.log(
+                PROGRESS_LEVEL,
                 "%s sync complete: %s/%s records processed",
                 model.name,
                 progress.completed,

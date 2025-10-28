@@ -2,12 +2,25 @@ import logging
 import sys
 from typing import Iterable, Optional, Set
 
+PROGRESS_LEVEL = 45
+PROGRESS_LEVEL_NAME = "PROGRESS"
+
+
+def _ensure_progress_level_registered() -> None:
+    if not hasattr(logging, PROGRESS_LEVEL_NAME):
+        logging.addLevelName(PROGRESS_LEVEL, PROGRESS_LEVEL_NAME)
+        setattr(logging, PROGRESS_LEVEL_NAME, PROGRESS_LEVEL)
+
+
+_ensure_progress_level_registered()
+
 _LOGGER_NAME = "odoosync"
 _MUTED_LEVELS: Set[str] = set()
 _MUTE_FILTER: Optional[logging.Filter] = None
 
 
 def _configure_root_logger() -> logging.Logger:
+    _ensure_progress_level_registered()
     logger = logging.getLogger(_LOGGER_NAME)
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
