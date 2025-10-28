@@ -99,7 +99,8 @@ Provide a one-off credentials file with::
 
   odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc
 
-Include dependent records discovered through many2one relations by either
+Include dependent records discovered through relational fields (many2one,
+one2many, many2many) when the related model is declared in your YAML file by either
 passing ``--sync-dependencies`` on the CLI or setting
 ``options.sync_dependencies`` to ``true`` in the YAML file::
 

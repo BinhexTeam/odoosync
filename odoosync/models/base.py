@@ -42,6 +42,9 @@ class OdooModel:
         self.field_mappings: Dict[str, str] = self._load_field_mappings(model_dict)
         self.value_mappings = self._normalize_value_mappings(model_dict.get("value_mappings"))
         self.retry_on_create = self._parse_retry_on_create(model_dict.get("retry_on_create"))
+        self.dependency_rel_fields: Dict[str, Dict[str, str]] = {}
+        self._dependency_read_fields: Set[str] = set()
+        self.read_fields: List[str] = []
 
     def load_recs(self, odoo, _ids: Iterable[int], dep: bool = False, chunk_size: Optional[int] = None) -> List[dict]:
         """Loads records into this model."""
@@ -63,9 +66,10 @@ class OdooModel:
             batches = [id_list]
 
         source_obj = odoo.env[self.name]
+        read_fields = getattr(self, "read_fields", None) or self.fields
         for batch in batches:
             try:
-                records = source_obj.read(batch, self.fields)
+                records = source_obj.read(batch, read_fields)
             except Exception as exc:  # noqa: BLE001 - surface remote RPC errors
                 logger.error(
                     "Failed to read batch containing %s records for %s: %s",
@@ -225,6 +229,8 @@ class OdooModel:
         self.many2onefields = {}
         self.external_relation_fields = set()
         self.field_specs = {}
+        self.dependency_rel_fields = {}
+        self._dependency_read_fields = set()
 
         field_ids = source_ir_fields.search(fields_domain)
         fields = source_ir_fields.read(field_ids, [])
@@ -248,6 +254,12 @@ class OdooModel:
                 continue
             if name in self.excluded_fields:
                 continue
+            if relation and ttype in {"one2many", "many2many"}:
+                self.dependency_rel_fields[name] = {
+                    "relation": relation,
+                    "type": ttype,
+                }
+                self._dependency_read_fields.add(name)
             if relation and ttype not in ("many2one",) and name not in self.field_mappings:
                 continue
 
@@ -295,6 +307,17 @@ class OdooModel:
             self.fields.append("id")
         if "id" not in self.dest_fields:
             self.dest_fields.insert(0, "id")
+        seen: Set[str] = set()
+        read_fields: List[str] = []
+        for field_name in self.fields:
+            if field_name not in seen:
+                read_fields.append(field_name)
+                seen.add(field_name)
+        for field_name in self._dependency_read_fields:
+            if field_name not in seen:
+                read_fields.append(field_name)
+                seen.add(field_name)
+        self.read_fields = read_fields
         logger.debug("Source fields: %s", self.fields)
         logger.debug("Destination fields: %s", self.dest_fields)
 

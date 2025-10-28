@@ -33,7 +33,7 @@ options:
   mute_log_levels:
     - INFO  # Optional: drop selected severities from the output (progress stays visible)
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
-  # sync_dependencies: true  # Optional: create related records outside the domain selection
+  # sync_dependencies: true  # Optional: load related records referenced by relational fields
   # batch_size: 500  # Optional: override default 1000 chunking
 
 models:

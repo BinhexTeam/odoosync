@@ -1053,6 +1053,28 @@ class ModelSyncer:
                         continue
                     elif rel_id:
                         dep_struct[rel_model_name].add(rel_id)
+                dependency_rel_fields = getattr(model, "dependency_rel_fields", {})
+                for field, meta in dependency_rel_fields.items():
+                    rel_model_name = meta.get("relation")
+                    if not rel_model_name:
+                        continue
+                    values = record.get(field)
+                    if not values:
+                        continue
+                    if isinstance(values, (list, tuple, set)):
+                        candidate_ids = [vid for vid in values if isinstance(vid, int) and vid]
+                    else:
+                        continue
+                    if not candidate_ids:
+                        continue
+                    rel_model = other_models.get(rel_model_name)
+                    if not rel_model:
+                        for rel_id in candidate_ids:
+                            ignore_struct[rel_model_name].add(rel_id)
+                        continue
+                    for rel_id in candidate_ids:
+                        if rel_id not in rel_model.record_ids:
+                            dep_struct[rel_model_name].add(rel_id)
         newly_loaded = {}
         add_translations(dep_struct)
         for rel_model_name, ids in dep_struct.items():
