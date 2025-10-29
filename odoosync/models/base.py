@@ -505,13 +505,31 @@ class OdooModel:
             return mapping_config["constant"]
 
         case_insensitive = mapping_config.get("case_insensitive", False)
-        lookup_value = value
-        if case_insensitive and isinstance(value, str):
-            lookup_value = value.lower()
-
         values_map: Dict[object, object] = mapping_config.get("values", {})
-        if lookup_value in values_map:
-            return values_map[lookup_value]
+
+        def _normalize_candidate(candidate):
+            normalized = candidate
+            if case_insensitive and isinstance(candidate, str):
+                normalized = candidate.lower()
+            return normalized
+
+        candidates = []
+        if isinstance(value, (list, tuple)):
+            candidates.append(value)
+            if value:
+                candidates.append(value[0])
+            if len(value) > 1:
+                candidates.append(value[1])
+        else:
+            candidates.append(value)
+
+        for candidate in candidates:
+            normalized = _normalize_candidate(candidate)
+            try:
+                if normalized in values_map:
+                    return values_map[normalized]
+            except TypeError:
+                continue
 
         default_value = mapping_config.get("default", _VALUE_MAPPING_UNSET)
         if default_value is not _VALUE_MAPPING_UNSET:
