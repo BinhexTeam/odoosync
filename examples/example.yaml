@@ -32,6 +32,9 @@ options:
   log_level: INFO  # Optional: override the logging threshold (DEBUG, INFO, WARNING, ERROR)
   mute_log_levels:
     - INFO  # Optional: drop selected severities from the output (progress stays visible)
+  # rpc_retry_attempts: 5  # Optional: number of attempts for transient HTTP errors (default 3)
+  # rpc_retry_delay: 2.0   # Optional: seconds to wait before the first retry (default 2.0)
+  # rpc_retry_backoff: 1.5 # Optional: multiplier applied to delay after each retry (default 1.5)
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
   # sync_dependencies: true  # Optional: load related records referenced by relational fields
   # batch_size: 500  # Optional: override default 1000 chunking

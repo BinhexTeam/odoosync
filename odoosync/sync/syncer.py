@@ -1,11 +1,15 @@
 import hashlib
 import logging
 import math
+import socket
+import time
 from collections import defaultdict
 from itertools import combinations
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import odoorpc
+
+from urllib.error import HTTPError, URLError
 
 from ..connection import OdooInstance
 from ..core import PROGRESS_LEVEL, get_logger, set_level, set_muted_levels
@@ -42,12 +46,63 @@ class ProgressTracker:
 class ModelSyncer:
     """Syncer instance."""
 
+    @staticmethod
+    def _coerce_positive_int(value, default: int) -> int:
+        try:
+            parsed = int(value)
+            if parsed <= 0:
+                raise ValueError
+            return parsed
+        except (TypeError, ValueError):
+            return int(default)
+
+    @staticmethod
+    def _coerce_non_negative_float(value, default: float) -> float:
+        try:
+            parsed = float(value)
+            if parsed < 0:
+                raise ValueError
+            return parsed
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _execute_with_retry(self, func, context: str):
+        attempts = getattr(self, "rpc_retry_attempts", 1) or 1
+        delay = getattr(self, "rpc_retry_delay", 0.0) or 0.0
+        backoff = getattr(self, "rpc_retry_backoff", 1.0) or 1.0
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return func()
+            except (HTTPError, URLError, socket.timeout, TimeoutError, ConnectionError, ConnectionResetError, BrokenPipeError) as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    logger.error("RPC call failed after %s attempt(s) (%s): %s", attempts, context, exc)
+                    raise
+                sleep_for = delay * (backoff ** (attempt - 1))
+                logger.warning(
+                    "RPC call failed (%s); retrying in %.2fs (%s/%s)",
+                    context,
+                    sleep_for,
+                    attempt,
+                    attempts,
+                )
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+            except Exception:
+                raise
+        if last_error:
+            raise last_error
+
     def __init__(self, _struct: dict, _timestamps: dict, options: Optional[dict] = None):
         self.options = _struct.get("options", {})
         self.dry_run = self.options.get("dry_run")
         self.debug = bool(self.options.get("debug"))
         self.sync_dependencies = bool(self.options.get("sync_dependencies"))
         self.force_sync = bool(self.options.get("force_sync"))
+        self.rpc_retry_attempts = self._coerce_positive_int(self.options.get("rpc_retry_attempts"), default=3)
+        self.rpc_retry_delay = self._coerce_non_negative_float(self.options.get("rpc_retry_delay"), default=2.0)
+        self.rpc_retry_backoff = self._coerce_non_negative_float(self.options.get("rpc_retry_backoff"), default=1.5)
 
         self.auto_xmlid_lookup = bool(self.options.get("auto_xmlid_lookup", True))
         log_level_opt = self.options.get("log_level")
@@ -554,13 +609,19 @@ class ModelSyncer:
         except (AttributeError, KeyError):
             cache[source_id] = None
             return None
-        record_ids = ir_model_data.search([
-            ("model", "=", model_name),
-            ("res_id", "=", source_id),
-        ])
+        record_ids = self._execute_with_retry(
+            lambda: ir_model_data.search([
+                ("model", "=", model_name),
+                ("res_id", "=", source_id),
+            ]),
+            context=f"ir.model.data search {model_name}[{source_id}]",
+        )
         xmlid = None
         if record_ids:
-            data = ir_model_data.read(record_ids[:1], ["module", "name"])
+            data = self._execute_with_retry(
+                lambda: ir_model_data.read(record_ids[:1], ["module", "name"]),
+                context=f"ir.model.data read {model_name}[{source_id}]",
+            )
             if data:
                 module = data[0].get("module")
                 name = data[0].get("name")
@@ -582,14 +643,20 @@ class ModelSyncer:
         except AttributeError:
             cache[key] = None
             return None
-        record_ids = ir_model_data.search([
-            ("module", "=", module),
-            ("name", "=", name),
-            ("model", "=", model_name),
-        ])
+        record_ids = self._execute_with_retry(
+            lambda: ir_model_data.search([
+                ("module", "=", module),
+                ("name", "=", name),
+                ("model", "=", model_name),
+            ]),
+            context=f"ir.model.data search dest {model_name} xmlid={xmlid}",
+        )
         dest_id = None
         if record_ids:
-            data = ir_model_data.read(record_ids[:1], ["res_id"])
+            data = self._execute_with_retry(
+                lambda: ir_model_data.read(record_ids[:1], ["res_id"]),
+                context=f"ir.model.data read dest {model_name} xmlid={xmlid}",
+            )
             if data:
                 dest_id = data[0].get("res_id")
         cache[key] = dest_id
@@ -619,11 +686,17 @@ class ModelSyncer:
             else:
                 chunk_size = getattr(self, "batch_size", None) or len(missing)
                 for chunk in self._iter_batches(missing, chunk_size):
-                    record_ids = ir_model_data.search([
-                        ("model", "=", model_name),
-                        ("res_id", "in", chunk),
-                    ])
-                    records = ir_model_data.read(record_ids, ["res_id", "module", "name"]) if record_ids else []
+                    record_ids = self._execute_with_retry(
+                        lambda: ir_model_data.search([
+                            ("model", "=", model_name),
+                            ("res_id", "in", chunk),
+                        ]),
+                        context=f"ir.model.data batch search {model_name}",
+                    )
+                    records = self._execute_with_retry(
+                        lambda: ir_model_data.read(record_ids, ["res_id", "module", "name"]),
+                        context=f"ir.model.data batch read {model_name}",
+                    ) if record_ids else []
                     data_by_res = {rec.get("res_id"): rec for rec in records}
                     for source_id in chunk:
                         record = data_by_res.get(source_id)
@@ -663,12 +736,18 @@ class ModelSyncer:
             if model_data:
                 for module, entries in by_module.items():
                     names = [name for _, name in entries]
-                    record_ids = model_data.search([
-                        ("module", "=", module),
-                        ("name", "in", names),
-                        ("model", "=", model_name),
-                    ])
-                    records = model_data.read(record_ids, ["module", "name", "res_id"]) if record_ids else []
+                    record_ids = self._execute_with_retry(
+                        lambda: model_data.search([
+                            ("module", "=", module),
+                            ("name", "in", names),
+                            ("model", "=", model_name),
+                        ]),
+                        context=f"ir.model.data search dest batch {model_name}",
+                    )
+                    records = self._execute_with_retry(
+                        lambda: model_data.read(record_ids, ["module", "name", "res_id"]),
+                        context=f"ir.model.data read dest batch {model_name}",
+                    ) if record_ids else []
                     name_to_res = {rec.get("name"): rec.get("res_id") for rec in records}
                     for source_id, name in entries:
                         dest_id = name_to_res.get(name)

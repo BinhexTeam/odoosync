@@ -118,6 +118,11 @@ alongside ``options.debug`` so you can tailor the output to the run at hand. Pro
 messages are always shown, even when their level is muted, so long-running runs remain
 observable.
 
+Transient network hiccups are retried automatically. Tune the behaviour with
+``options.rpc_retry_attempts`` (default ``3``), ``options.rpc_retry_delay`` (seconds
+before the first retry, default ``2.0``) and ``options.rpc_retry_backoff`` (multiplier
+applied after each retry, default ``1.5``) if your environment needs longer wait times.
+
 To remap fields between source and destination models, add a ``field_mappings``
 section inside the model definition in your YAML file::
 
