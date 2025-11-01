@@ -468,25 +468,45 @@ class ModelSyncer:
     def _get_xmlid(self, model_name, _id):
         return "{}_{}".format(model_name.replace(".", "_"), _id)
 
-    def create_xmlid(self, model_name, source_id, dest_id):
-        """Create a link between source id and dest id."""
-        xmlid = self._get_xmlid(model_name, source_id)
-        self.dest.ir_model_obj.create({
+    def _ensure_xmlid(self, model_name: str, res_id: int, xmlid: str) -> None:
+        """Create or update the xmlid so we always point at the latest record."""
+        payload = {
             "model": model_name,
             "module": self.prefix,
             "name": xmlid,
-            "res_id": dest_id,
-        })
+            "res_id": res_id,
+        }
+        try:
+            self.dest.ir_model_obj.create(payload)
+            return
+        except odoorpc.error.RPCError as exc:
+            message = str(exc) if exc else ""
+            if "ir_model_data_module_name_uniq_index" not in message:
+                raise
+            existing = self.dest.ir_model_obj.search([
+                ("module", "=", self.prefix),
+                ("name", "=", xmlid),
+            ])
+            if not existing:
+                raise
+            self.dest.ir_model_obj.write(existing, {"res_id": res_id})
+            logger.info(
+                "Re-linked existing xmlid %s.%s to %s[%s]",
+                self.prefix,
+                xmlid,
+                model_name,
+                res_id,
+            )
+
+    def create_xmlid(self, model_name, source_id, dest_id):
+        """Create a link between source id and dest id."""
+        xmlid = self._get_xmlid(model_name, source_id)
+        self._ensure_xmlid(model_name, dest_id, xmlid)
 
     def create_reverse_xmlid(self, model_name, source_id, dest_id):
         """Create a link between dest id and source id."""
         xmlid = self._get_xmlid(model_name, dest_id)
-        self.dest.ir_model_obj.create({
-            "model": model_name,
-            "module": self.prefix,
-            "name": xmlid,
-            "res_id": source_id,
-        })
+        self._ensure_xmlid(model_name, source_id, xmlid)
 
     def _add_translations(self, loaded):
         """Create translation tables for source record id -> dest record id."""
@@ -938,7 +958,7 @@ class ModelSyncer:
         )
         progress = ProgressTracker(model.name, total_records)
 
-        to_update = {}
+        to_update: Dict[int, Dict[str, object]] = {}
         to_create = []
         dest_ids = []
         for record in model.records:
@@ -956,7 +976,12 @@ class ModelSyncer:
                 mapped = model._map_fields(record, find_dest_id_function)
                 dest_ids.append(dest_id)
                 record_hash = self._make_hash(mapped)
-                to_update[dest_id] = (source_id, record_hash, mapped)
+                to_update[dest_id] = {
+                    "source_id": source_id,
+                    "hash": record_hash,
+                    "mapped": mapped,
+                    "record": record,
+                }
                 continue
             if bool(record.get("__sfit_dep")) or source_id not in model.translatable_ids:
                 to_create.append((source_id, record))
@@ -966,7 +991,12 @@ class ModelSyncer:
                 if dest_id:
                     dest_ids.append(dest_id)
                     record_hash = self._make_hash(mapped)
-                    to_update[dest_id] = (source_id, record_hash, mapped)
+                    to_update[dest_id] = {
+                        "source_id": source_id,
+                        "hash": record_hash,
+                        "mapped": mapped,
+                        "record": record,
+                    }
                 else:
                     to_create.append((source_id, record))
 
@@ -1088,11 +1118,57 @@ class ModelSyncer:
             logger.info("Checking hashes...")
             old_vals = obj.read(dest_ids, model.dest_fields)
             for vals in old_vals:
-                old_hash = self._make_hash(vals)
                 dest_id = vals["id"]
-                source_id, new_hash, new_vals = to_update[dest_id]
+                entry = to_update.get(dest_id)
+                if not entry:
+                    continue
+                old_hash = self._make_hash(vals)
+                source_id = entry["source_id"]
+                new_hash = entry["hash"]
+                new_vals = entry["mapped"]
                 if old_hash != new_hash:
                     really_update.append((source_id, dest_id, new_vals))
+                elif logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "No diff for %s[%s]; existing=%s, incoming=%s",
+                        model.name,
+                        dest_id,
+                        vals,
+                        new_vals,
+                    )
+
+            found_ids = {vals["id"] for vals in old_vals}
+            missing_ids = [dest_id for dest_id in dest_ids if dest_id not in found_ids]
+            for missing_id in missing_ids:
+                entry = to_update.pop(missing_id, None)
+                if not entry:
+                    continue
+                source_id = entry["source_id"]
+                logger.warning(
+                    "Destination %s[%s] missing on read; recreating from source %s",
+                    model.name,
+                    missing_id,
+                    source_id,
+                )
+                payload = entry["mapped"]
+                if payload is None:
+                    payload = model._map_fields(entry["record"], find_dest_id_function)
+                if self.dry_run:
+                    continue
+                new_dest_id = self._create_record_with_retry(
+                    odoo_instance,
+                    model,
+                    payload,
+                    source_id,
+                    add_dest_id_function,
+                    create_xmlid_function,
+                )
+                if not new_dest_id:
+                    logger.error(
+                        "Failed to recreate missing %s from source %s",
+                        model.name,
+                        source_id,
+                    )
 
         if really_update:
             logger.info("%s records are changed", len(really_update))

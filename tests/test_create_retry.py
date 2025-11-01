@@ -33,6 +33,44 @@ class DummyLogModel:
         return len(self.records)
 
 
+class DummyModelData:
+    def __init__(self):
+        self.records = {}
+        self.write_calls = []
+        self._next_id = 1
+
+    def create(self, vals):
+        key = (vals["module"], vals["name"])
+        if key in self.records:
+            raise odoorpc.error.RPCError(
+                'duplicate key value violates unique constraint "ir_model_data_module_name_uniq_index"'
+            )
+        record_id = self._next_id
+        self._next_id += 1
+        self.records[key] = dict(vals, id=record_id)
+        return record_id
+
+    def search(self, domain):
+        module = None
+        name = None
+        for field, operator, value in domain:
+            if field == "module" and operator == "=":
+                module = value
+            elif field == "name" and operator == "=":
+                name = value
+        return [
+            record["id"]
+            for (rec_module, rec_name), record in self.records.items()
+            if (module is None or rec_module == module) and (name is None or rec_name == name)
+        ]
+
+    def write(self, ids, vals):
+        for key, record in self.records.items():
+            if record["id"] in ids:
+                record.update(vals)
+                self.write_calls.append((record["id"], dict(vals)))
+
+
 class SequencedRPCModel:
     def __init__(self, side_effects):
         self.side_effects = side_effects
@@ -73,6 +111,11 @@ class CreateRetryTests(unittest.TestCase):
         self.syncer = ModelSyncer.__new__(ModelSyncer)
         self.syncer.dry_run = False
         self.syncer._external_translations = defaultdict(dict)
+        self.syncer.prefix = "__export_sfit__"
+        dest = type("DummyDest", (), {})()
+        dest.ir_model_obj = DummyModelData()
+        self.syncer.dest = dest
+        self.ir_model_data = dest.ir_model_obj
 
     def test_retry_removes_single_field(self):
         model = OdooModel({
@@ -178,6 +221,18 @@ class CreateRetryTests(unittest.TestCase):
         self.assertIsNone(dest_id)
         self.assertEqual(len(rpc_model.calls), 3)  # original + two single-field retries
         self.assertTrue(any('exhausted retry combinations' in rec['message'] for rec in log_model.records))
+
+    def test_ensure_xmlid_relinks_existing(self):
+        xmlid = 'mrp_bom_line_2708'
+        self.syncer._ensure_xmlid('mrp.bom.line', 2140, xmlid)
+        record = self.ir_model_data.records[(self.syncer.prefix, xmlid)]
+        self.assertEqual(record['res_id'], 2140)
+
+        # Second call should update the existing xmlid instead of failing.
+        self.syncer._ensure_xmlid('mrp.bom.line', 9999, xmlid)
+        record = self.ir_model_data.records[(self.syncer.prefix, xmlid)]
+        self.assertEqual(record['res_id'], 9999)
+        self.assertTrue(self.ir_model_data.write_calls)
 
 
 if __name__ == '__main__':
