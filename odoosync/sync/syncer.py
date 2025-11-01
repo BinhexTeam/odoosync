@@ -916,6 +916,10 @@ class ModelSyncer:
             translate_function = self._translate_to_dest_id
             odoo_instance = self.dest
             self._prefetch_destination_ids(model, model.records)
+            
+        # Inject Odoo instances for indirect mapping support
+        model._source_odoo = self.source.odoo
+        model._dest_odoo = self.dest.odoo
         obj = odoo_instance.odoo.env[model.name]
 
         total_records = len(model.records)

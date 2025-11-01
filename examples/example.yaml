@@ -97,3 +97,11 @@ models:
         NY: 'US-33'
   context: {'active_test': False}
 
+- model: mrp.bom.line
+  domain: [['bom_id.product_tmpl_id', '!=', False]]
+  field_mappings:
+    product_id:
+      indirect_via: product_tmpl_id
+      target_model: product.template
+      target_field: product_variant_id.product_tmpl_id.product_variant_id  # traverse relations via dotted path
+

@@ -39,12 +39,14 @@ class OdooModel:
         self.reverse = bool(model_dict.get("reverse"))
         self.trans: Dict[int, int] = {}
         self.translatable_ids: Set[int] = set()
+        self.indirect_mappings: Dict[str, dict] = {}
         self.field_mappings: Dict[str, str] = self._load_field_mappings(model_dict)
         self.value_mappings = self._normalize_value_mappings(model_dict.get("value_mappings"))
         self.retry_on_create = self._parse_retry_on_create(model_dict.get("retry_on_create"))
         self.dependency_rel_fields: Dict[str, Dict[str, str]] = {}
         self._dependency_read_fields: Set[str] = set()
         self.read_fields: List[str] = []
+        self._field_meta_cache: Dict[Tuple[str, str], Optional[dict]] = {}
 
     def load_recs(self, odoo, _ids: Iterable[int], dep: bool = False, chunk_size: Optional[int] = None) -> List[dict]:
         """Loads records into this model."""
@@ -152,7 +154,51 @@ class OdooModel:
             )
             return {}
 
-        return dict(field_mappings or {})
+        # Parse both simple and indirect field mappings
+        simple_mappings = {}
+        self.indirect_mappings = {}
+        
+        for source_field, mapping_config in (field_mappings or {}).items():
+            if isinstance(mapping_config, str):
+                # Simple mapping: source_field -> target_field
+                simple_mappings[source_field] = mapping_config
+            elif isinstance(mapping_config, dict) and 'indirect_via' in mapping_config:
+                # Indirect mapping: source_field -> target via related field
+                self.indirect_mappings[source_field] = mapping_config
+
+                # Allow override of the destination field name (defaults to the source field)
+                dest_field = (
+                    mapping_config.get('destination_field')
+                    or mapping_config.get('dest_field')
+                    or source_field
+                )
+
+                simple_mappings[source_field] = dest_field
+                logger.debug(
+                    "Loaded indirect mapping for %s[%s]: %s",
+                    self.name or "<unknown>",
+                    source_field,
+                    mapping_config,
+                )
+            elif isinstance(mapping_config, dict):
+                logger.warning(
+                    "Unsupported field mapping configuration for %s[%s]: %r",
+                    self.name or "<unknown>",
+                    source_field,
+                    mapping_config,
+                )
+            else:
+                logger.warning(
+                    "Invalid field mapping for %s[%s]: expected string or dict, got %r",
+                    self.name or "<unknown>",
+                    source_field,
+                    mapping_config,
+                )
+
+        if self.indirect_mappings:
+            logger.debug("Final indirect mappings for %s: %s", self.name or "<unknown>", self.indirect_mappings)
+
+        return simple_mappings
 
     def _parse_retry_on_create(self, config: Optional[dict]) -> Optional[dict]:
         if not config:
@@ -384,6 +430,14 @@ class OdooModel:
                 return None, False, "missing relation metadata for many2one field"
             dest_id = find_dest_id_function(rel_model, source_rel_id)
             if not dest_id:
+                logger.debug("Direct mapping failed for %s[%s], trying indirect mapping", rel_model, source_rel_id)
+                # Try indirect mapping through related model
+                indirect_dest_id = self._try_indirect_mapping(
+                    source_field, dest_field, source_rel_id, rel_model, find_dest_id_function
+                )
+                if indirect_dest_id:
+                    logger.info("Indirect mapping succeeded: %s[%s] -> dest %s", rel_model, source_rel_id, indirect_dest_id)
+                    return indirect_dest_id, True, None
                 return None, True, f"Mapping failed: consider adding manual mapping for record {rel_model}[{source_rel_id}]"
             return dest_id, True, None
 
@@ -536,6 +590,252 @@ class OdooModel:
             return default_value
 
         return value
+
+    def _get_field_metadata(self, odoo, model_name: str, field_name: str, model_obj=None):
+        cache_key = (model_name, field_name)
+        if cache_key in self._field_meta_cache:
+            return self._field_meta_cache[cache_key]
+
+        try:
+            target_model = model_obj or odoo.env[model_name]
+            metadata = target_model.fields_get([field_name], attributes=["type", "relation"])
+        except Exception as exc:  # noqa: BLE001 - log and proceed without metadata
+            logger.debug(
+                "Failed to fetch metadata for %s.%s: %s",
+                model_name,
+                field_name,
+                exc,
+            )
+            self._field_meta_cache[cache_key] = None
+            return None
+
+        info = metadata.get(field_name) if isinstance(metadata, dict) else None
+        if info is not None and not isinstance(info, dict):
+            info = None
+
+        self._field_meta_cache[cache_key] = info
+        return info
+
+    @staticmethod
+    def _extract_many2one_id(value):
+        if isinstance(value, (list, tuple)) and value:
+            candidate = value[0]
+            if isinstance(candidate, int):
+                return candidate
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, dict):
+            candidate = value.get("id")
+            if isinstance(candidate, int):
+                return candidate
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _resolve_target_field_value(self, dest_odoo, start_model: str, start_id: int, target_field: str):
+        if not target_field:
+            return None
+
+        path = [segment.strip() for segment in str(target_field).split(".") if segment.strip()]
+        if not path:
+            return None
+
+        current_model = start_model
+        current_id = start_id
+        current_value = None
+
+        for idx, field_name in enumerate(path):
+            try:
+                model_obj = dest_odoo.env[current_model]
+            except Exception as exc:  # noqa: BLE001 - remote lookup failure
+                logger.debug(
+                    "Failed to access model %s while resolving %s: %s",
+                    current_model,
+                    target_field,
+                    exc,
+                )
+                return None
+
+            try:
+                records = model_obj.read([current_id], [field_name])
+            except Exception as exc:  # noqa: BLE001 - unreadable remote record
+                logger.debug(
+                    "Failed to read %s[%s].%s while resolving %s: %s",
+                    current_model,
+                    current_id,
+                    field_name,
+                    target_field,
+                    exc,
+                )
+                return None
+
+            if not records:
+                logger.debug(
+                    "No data returned for %s[%s].%s while resolving %s",
+                    current_model,
+                    current_id,
+                    field_name,
+                    target_field,
+                )
+                return None
+
+            current_value = records[0].get(field_name)
+            field_meta = self._get_field_metadata(dest_odoo, current_model, field_name, model_obj)
+            is_last = idx == len(path) - 1
+
+            if is_last:
+                if field_meta and field_meta.get("type") == "many2one":
+                    extracted = self._extract_many2one_id(current_value)
+                    if extracted is None:
+                        logger.debug(
+                            "Final many2one field %s.%s had no resolvable id (value=%r)",
+                            current_model,
+                            field_name,
+                            current_value,
+                        )
+                        return None
+                    return extracted
+
+                extracted = self._extract_many2one_id(current_value)
+                if extracted is not None and not field_meta:
+                    return extracted
+                return current_value
+
+            if not current_value:
+                logger.debug(
+                    "Intermediate field %s.%s returned empty value while resolving %s",
+                    current_model,
+                    field_name,
+                    target_field,
+                )
+                return None
+
+            if not field_meta:
+                logger.debug(
+                    "Missing metadata for %s.%s while traversing %s",
+                    current_model,
+                    field_name,
+                    target_field,
+                )
+                return None
+
+            if field_meta.get("type") != "many2one":
+                logger.debug(
+                    "Field %s.%s is type %s, cannot continue path %s",
+                    current_model,
+                    field_name,
+                    field_meta.get("type"),
+                    target_field,
+                )
+                return None
+
+            relation = field_meta.get("relation")
+            next_id = self._extract_many2one_id(current_value)
+            if not relation or not next_id:
+                logger.debug(
+                    "Cannot follow relation from %s.%s (relation=%r value=%r) while resolving %s",
+                    current_model,
+                    field_name,
+                    relation,
+                    current_value,
+                    target_field,
+                )
+                return None
+
+            current_model = relation
+            current_id = next_id
+
+        return None
+
+    def _try_indirect_mapping(self, source_field, dest_field, source_rel_id, rel_model, find_dest_id_function):
+        """Try to find destination ID through indirect relationship mapping."""
+        logger.debug("Trying indirect mapping for field %s, rel_model=%s, source_rel_id=%s", source_field, rel_model, source_rel_id)
+        
+        # Check if we have an indirect mapping configuration
+        indirect_config = getattr(self, 'indirect_mappings', {}).get(source_field)
+        logger.debug("Indirect config for %s: %s", source_field, indirect_config)
+        if not indirect_config:
+            logger.debug("No indirect mapping config found for field %s", source_field)
+            return None
+            
+        indirect_via = indirect_config.get('indirect_via')
+        if not indirect_via:
+            return None
+            
+        try:
+            # Get the source Odoo instance from syncer context
+            source_odoo = getattr(self, '_source_odoo', None)
+            if not source_odoo:
+                return None
+                
+            # Look up the related record on source
+            source_obj = source_odoo.env[rel_model]
+            related_records = source_obj.read([source_rel_id], [indirect_via])
+            
+            if not related_records:
+                return None
+                
+            related_value = related_records[0].get(indirect_via)
+            if not related_value:
+                return None
+                
+            # Extract the ID from the many2one field
+            if isinstance(related_value, (list, tuple)) and related_value:
+                related_id = related_value[0]
+            else:
+                return None
+                
+            # Try to find this related record in the destination
+            # Use the target_model from configuration
+            target_model = indirect_config.get('target_model')
+            if not target_model:
+                logger.debug("No target_model specified in indirect mapping for %s", source_field)
+                return None
+                
+            dest_template_id = find_dest_id_function(target_model, related_id)
+            if not dest_template_id:
+                logger.debug("Could not find destination %s[%s]", target_model, related_id)
+                return None
+                
+            logger.debug("Found destination %s[%s] -> %s", target_model, related_id, dest_template_id)
+            
+            # Now get the target_field from the destination template  
+            dest_odoo = getattr(self, '_dest_odoo', None)
+            if not dest_odoo:
+                return None
+                
+            # Get the target_field from configuration (default to 'product_variant_id' for backward compatibility)
+            target_field = indirect_config.get('target_field', 'product_variant_id')
+
+            resolved_value = self._resolve_target_field_value(dest_odoo, target_model, dest_template_id, target_field)
+
+            if resolved_value is None:
+                logger.debug(
+                    "Could not resolve target field path %s starting from %s[%s]",
+                    target_field,
+                    target_model,
+                    dest_template_id,
+                )
+                return None
+
+            logger.debug(
+                "Indirect mapping successful via %s[%s] using path %s -> %s",
+                target_model,
+                dest_template_id,
+                target_field,
+                resolved_value,
+            )
+            return resolved_value
+            
+        except Exception as exc:
+            logger.debug("Indirect mapping failed for %s[%s] via %s: %s", rel_model, source_rel_id, indirect_via, exc)
+            return None
 
 
 __all__ = ["OdooModel", "INTERNAL_RUNTIME_FIELDS", "DEFAULT_EXCLUDED_FIELDS"]
