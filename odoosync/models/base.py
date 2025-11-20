@@ -34,6 +34,12 @@ class OdooModel:
         self.domain = model_dict.get("domain", [])
         self.no_domain = model_dict.get("no_domain")
         self.context = model_dict.get("context", {})
+        self.has_batch_size_override = "batch_size" in model_dict
+        self.batch_size_override = (
+            self._parse_batch_size_override(model_dict.get("batch_size"))
+            if self.has_batch_size_override
+            else None
+        )
         self.excluded_fields = set(model_dict.get("excluded_fields", [])).union(set(DEFAULT_EXCLUDED_FIELDS))
         self.included_fields = set(model_dict.get("included_fields", []))
         self.reverse = bool(model_dict.get("reverse"))
@@ -253,6 +259,26 @@ class OdooModel:
         if max_subset is not None:
             result["max_subset"] = max_subset
         return result
+
+    def _parse_batch_size_override(self, value) -> Optional[int]:
+        if value in (None, "", False):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid batch_size %r for %s; expected a positive integer.",
+                value,
+                self.name or "<unknown>",
+            )
+            return None
+        if parsed <= 0:
+            logger.warning(
+                "Batch size override for %s must be positive; batching disabled for this model.",
+                self.name or "<unknown>",
+            )
+            return None
+        return parsed
 
     def determine_fields(
         self,

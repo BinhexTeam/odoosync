@@ -146,6 +146,76 @@ class BatchCreationTests(unittest.TestCase):
         # With batching disabled the create should receive all records in one call
         self.assertEqual(fake_model.batch_lengths, [3])
 
+    def test_model_override_batch_size_used(self):
+        syncer = self._build_syncer(batch_size=5)
+        model = OdooModel({'model': 'res.partner', 'batch_size': 2})
+        model.fields = ['id', 'name']
+        model.dest_fields = ['id', 'name']
+        model.field_specs = {
+            'name': {
+                'dest_field': 'name',
+                'source_type': 'char',
+                'source_relation': None,
+                'dest_type': 'char',
+                'dest_relation': None,
+            }
+        }
+        model.records = [
+            {'id': 1, 'name': 'Alpha'},
+            {'id': 2, 'name': 'Beta'},
+            {'id': 3, 'name': 'Gamma'},
+            {'id': 4, 'name': 'Delta'},
+            {'id': 5, 'name': 'Epsilon'},
+        ]
+        syncer.models_by_name = {model.name: model}
+        fake_model = BatchCreateModel()
+        syncer.dest = types.SimpleNamespace(
+            odoo=types.SimpleNamespace(env=DummyEnv({'res.partner': fake_model}))
+        )
+        syncer.source = syncer.dest
+        syncer.dest.ir_model_obj = types.SimpleNamespace(
+            search=lambda *args, **kwargs: [],
+            read=lambda *args, **kwargs: [],
+        )
+
+        syncer._sync_one_model(model)
+
+        self.assertEqual(fake_model.batch_lengths, [2, 2, 1])
+
+    def test_model_override_can_disable_batching(self):
+        syncer = self._build_syncer(batch_size=2)
+        model = OdooModel({'model': 'res.partner', 'batch_size': None})
+        model.fields = ['id', 'name']
+        model.dest_fields = ['id', 'name']
+        model.field_specs = {
+            'name': {
+                'dest_field': 'name',
+                'source_type': 'char',
+                'source_relation': None,
+                'dest_type': 'char',
+                'dest_relation': None,
+            }
+        }
+        model.records = [
+            {'id': 1, 'name': 'Alpha'},
+            {'id': 2, 'name': 'Beta'},
+            {'id': 3, 'name': 'Gamma'},
+        ]
+        syncer.models_by_name = {model.name: model}
+        fake_model = BatchCreateModel()
+        syncer.dest = types.SimpleNamespace(
+            odoo=types.SimpleNamespace(env=DummyEnv({'res.partner': fake_model}))
+        )
+        syncer.source = syncer.dest
+        syncer.dest.ir_model_obj = types.SimpleNamespace(
+            search=lambda *args, **kwargs: [],
+            read=lambda *args, **kwargs: [],
+        )
+
+        syncer._sync_one_model(model)
+
+        self.assertEqual(fake_model.batch_lengths, [3])
+
 
 if __name__ == '__main__':
     unittest.main()

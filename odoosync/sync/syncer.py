@@ -692,6 +692,11 @@ class ModelSyncer:
         for index in range(0, len(sequence), size):
             yield sequence[index : index + size]
 
+    def _get_effective_batch_size(self, model: Optional[OdooModel] = None) -> Optional[int]:
+        if model and getattr(model, "has_batch_size_override", False):
+            return getattr(model, "batch_size_override", None)
+        return self.batch_size
+
     def _lookup_source_xmlids_bulk(self, model_name: str, source_ids: List[int]) -> Dict[int, Optional[str]]:
         cache = self._source_xmlid_cache[model_name]
         result: Dict[int, Optional[str]] = {}
@@ -941,11 +946,12 @@ class ModelSyncer:
         model._source_odoo = self.source.odoo
         model._dest_odoo = self.dest.odoo
         obj = odoo_instance.odoo.env[model.name]
+        model_batch_size = self._get_effective_batch_size(model)
 
         total_records = len(model.records)
-        if self.batch_size:
-            batches = math.ceil(total_records / self.batch_size) if total_records else 0
-            batch_descriptor = self.batch_size
+        if model_batch_size:
+            batches = math.ceil(total_records / model_batch_size) if total_records else 0
+            batch_descriptor = model_batch_size
         else:
             batches = 1 if total_records else 0
             batch_descriptor = "all"
@@ -1105,7 +1111,7 @@ class ModelSyncer:
             mapped = model._map_fields(record, find_dest_id_function)
             batch_sources.append(source_id)
             batch_payload.append(mapped)
-            if self.batch_size and len(batch_payload) >= self.batch_size:
+            if model_batch_size and len(batch_payload) >= model_batch_size:
                 created_sources.update(_flush_create_batch(batch_sources, batch_payload))
                 batch_payload = []
                 batch_sources = []
@@ -1243,7 +1249,7 @@ class ModelSyncer:
                 odoo_instance,
                 list(ids_to_load),
                 dep=True,
-                chunk_size=self.batch_size,
+                chunk_size=self._get_effective_batch_size(rel_model),
             )
             newly_loaded[rel_model_name] = recs
         self._load_dependencies_of_records(odoo_instance, newly_loaded, other_models, add_translations)
@@ -1332,7 +1338,8 @@ class ModelSyncer:
                 domain = self._prepare_model_domain(model, since)
                 logger.info("Searching: %s %s", model.name, domain)
                 odoo_env.context = model.context
-                limit = self.batch_size if self.batch_size else None
+                model_batch_size = self._get_effective_batch_size(model)
+                limit = model_batch_size if model_batch_size else None
                 offset = 0
                 while True:
                     search_kwargs = {}
@@ -1347,7 +1354,7 @@ class ModelSyncer:
                         model.name,
                         offset,
                     )
-                    model.load_recs(odoo_env, ids, chunk_size=self.batch_size)
+                    model.load_recs(odoo_env, ids, chunk_size=model_batch_size)
                     if not limit:
                         break
                     offset += len(ids)

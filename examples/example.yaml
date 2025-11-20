@@ -42,6 +42,7 @@ options:
 models:
 
 - model: res.partner
+  batch_size: 250  # Optional: override per-model chunk size (falls back to options.batch_size/default)
   domain: [['customer_rank', '>', 0], ['company_id', '=', 2]]
   field_mappings:
     x_field: y_field        # rename custom field when the destination uses y_field

@@ -106,6 +106,11 @@ passing ``--sync-dependencies`` on the CLI or setting
 
   odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc --sync-dependencies
 
+Chunk sizes default to 1,000 records per request. Override them globally with
+``options.batch_size`` or override per-model limits by adding ``batch_size``
+under each model definition (set it to ``null`` to disable batching for that
+model only).
+
 Automatic reuse of records by XML ID is enabled by default. Set
 ``options.auto_xmlid_lookup`` to ``false`` in the YAML file if you prefer to
 force manual mappings for module-provided data instead of relying on shared
