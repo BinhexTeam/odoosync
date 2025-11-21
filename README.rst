@@ -109,7 +109,10 @@ passing ``--sync-dependencies`` on the CLI or setting
 Chunk sizes default to 1,000 records per request. Override them globally with
 ``options.batch_size`` or override per-model limits by adding ``batch_size``
 under each model definition (set it to ``null`` to disable batching for that
-model only).
+model only). Translation XMLID lookups have their own limit via
+``options.translation_batch_size`` (also defaulting to 1,000). Set that option
+to ``null`` or use ``options.disable_translation_batching`` when you want to
+fetch all translations in a single RPC call.
 
 Automatic reuse of records by XML ID is enabled by default. Set
 ``options.auto_xmlid_lookup`` to ``false`` in the YAML file if you prefer to

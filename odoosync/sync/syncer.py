@@ -5,7 +5,7 @@ import socket
 import time
 from collections import defaultdict
 from itertools import combinations
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 
 import odoorpc
 
@@ -16,6 +16,7 @@ from ..core import PROGRESS_LEVEL, get_logger, set_level, set_muted_levels
 from ..models import INTERNAL_RUNTIME_FIELDS, OdooModel
 
 logger = get_logger(__name__)
+T = TypeVar("T")
 
 
 class ProgressTracker:
@@ -181,6 +182,36 @@ class ModelSyncer:
             logger.debug("Using batch size %s for record retrieval", self.batch_size)
         else:
             logger.debug("Batch size disabled; fetching records in a single request")
+
+        default_translation_batch_size = 1000
+        disable_translation_batching = bool(self.options.get("disable_translation_batching"))
+        translation_batch_option = self.options.get("translation_batch_size")
+        if disable_translation_batching:
+            self.translation_batch_size = None
+        elif translation_batch_option is None:
+            self.translation_batch_size = default_translation_batch_size
+        else:
+            try:
+                parsed = int(translation_batch_option)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid translation batch size %r provided; falling back to default of %s",
+                    translation_batch_option,
+                    default_translation_batch_size,
+                )
+                parsed = default_translation_batch_size
+            if parsed <= 0:
+                logger.warning(
+                    "Translation batch size %s is non-positive; disabling translation batching",
+                    translation_batch_option,
+                )
+                self.translation_batch_size = None
+            else:
+                self.translation_batch_size = parsed
+        if self.translation_batch_size:
+            logger.debug("Using translation batch size %s for XMLID lookups", self.translation_batch_size)
+        else:
+            logger.debug("Translation batching disabled; XMLID lookups happen in a single request")
 
     def _parse_record_id_mappings(
         self, struct: dict
@@ -513,12 +544,33 @@ class ModelSyncer:
         xmlids = []
         for model_name, _ids in loaded.items():
             for source_id in list(_ids):
-                xmlids.append(self._get_xmlid(model_name, source_id))
-        dest_external_ids = self.dest.ir_model_obj.search([
-            ("name", "in", xmlids),
-            ("module", "=", self.prefix),
-        ])
-        dest_external_records = self.dest.ir_model_obj.read(dest_external_ids, ["name", "model", "res_id"])
+                xmlid = self._get_xmlid(model_name, source_id)
+                if xmlid:
+                    xmlids.append(xmlid)
+
+        unique_xmlids = list(dict.fromkeys(xmlids)) if xmlids else []
+        dest_external_records: List[dict] = []
+        ir_model_data = getattr(self.dest, "ir_model_obj", None)
+        if ir_model_data and unique_xmlids:
+            chunk_size = self.translation_batch_size or len(unique_xmlids)
+            for chunk in self._iter_batches(unique_xmlids, chunk_size):
+                if not chunk:
+                    continue
+                dest_external_ids = self._execute_with_retry(
+                    lambda chunk=chunk: ir_model_data.search([
+                        ("name", "in", chunk),
+                        ("module", "=", self.prefix),
+                    ]),
+                    context=f"ir.model.data batched search ({len(chunk)} xmlids)",
+                )
+                if not dest_external_ids:
+                    continue
+                dest_external_records.extend(
+                    self._execute_with_retry(
+                        lambda ids=dest_external_ids: ir_model_data.read(ids, ["name", "model", "res_id"]),
+                        context=f"ir.model.data batched read ({len(dest_external_ids)} ids)",
+                    )
+                )
         for record in dest_external_records:
             try:
                 source_id = int(str(record["name"].split(".")[-1]).split("_")[-1])
@@ -530,14 +582,40 @@ class ModelSyncer:
 
     def _add_reverse_translations(self, loaded):
         """Create translation tables for dest record id -> source record id."""
-        dest_external_ids = []
+        dest_external_ids: List[int] = []
+        ir_model_data = getattr(self.dest, "ir_model_obj", None)
+        if not ir_model_data:
+            return
         for model_name, _ids in loaded.items():
-            dest_external_ids += self.dest.ir_model_obj.search([
-                ("res_id", "in", list(_ids)),
-                ("model", "=", model_name),
-                ("module", "=", self.prefix),
-            ])
-        dest_external_records = self.dest.ir_model_obj.read(dest_external_ids, ["name", "model", "res_id"])
+            id_list = list(_ids)
+            if not id_list:
+                continue
+            chunk_size = self.translation_batch_size or len(id_list)
+            for chunk in self._iter_batches(id_list, chunk_size):
+                if not chunk:
+                    continue
+                dest_external_ids.extend(
+                    self._execute_with_retry(
+                        lambda chunk=chunk, model_name=model_name: ir_model_data.search([
+                            ("res_id", "in", chunk),
+                            ("model", "=", model_name),
+                            ("module", "=", self.prefix),
+                        ]),
+                        context=f"ir.model.data reverse search {model_name} ({len(chunk)} ids)",
+                    )
+                )
+        dest_external_records: List[dict] = []
+        if dest_external_ids:
+            chunk_size = self.translation_batch_size or len(dest_external_ids)
+            for chunk in self._iter_batches(dest_external_ids, chunk_size):
+                if not chunk:
+                    continue
+                dest_external_records.extend(
+                    self._execute_with_retry(
+                        lambda chunk=chunk: ir_model_data.read(chunk, ["name", "model", "res_id"]),
+                        context=f"ir.model.data reverse read ({len(chunk)} ids)",
+                    )
+                )
         for record in dest_external_records:
             try:
                 source_id = int(str(record["name"].split(".")[-1]).split("_")[-1])
@@ -682,7 +760,7 @@ class ModelSyncer:
         cache[key] = dest_id
         return dest_id
 
-    def _iter_batches(self, items: Iterable[int], size: Optional[int]) -> Iterable[List[int]]:
+    def _iter_batches(self, items: Iterable[T], size: Optional[int]) -> Iterable[List[T]]:
         sequence = list(items)
         if not sequence:
             return

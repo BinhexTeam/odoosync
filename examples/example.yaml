@@ -38,6 +38,7 @@ options:
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
   # sync_dependencies: true  # Optional: load related records referenced by relational fields
   # batch_size: 500  # Optional: override default 1000 chunking
+  # translation_batch_size: 750  # Optional: limit ir.model.data lookups per request (default 1000)
 
 models:
 
