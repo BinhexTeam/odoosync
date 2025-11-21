@@ -838,27 +838,30 @@ class ModelSyncer:
 
             if model_data:
                 for module, entries in by_module.items():
-                    names = [name for _, name in entries]
-                    record_ids = self._execute_with_retry(
-                        lambda: model_data.search([
-                            ("module", "=", module),
-                            ("name", "in", names),
-                            ("model", "=", model_name),
-                        ]),
-                        context=f"ir.model.data search dest batch {model_name}",
-                    )
-                    records = self._execute_with_retry(
-                        lambda: model_data.read(record_ids, ["module", "name", "res_id"]),
-                        context=f"ir.model.data read dest batch {model_name}",
-                    ) if record_ids else []
-                    name_to_res = {rec.get("name"): rec.get("res_id") for rec in records}
-                    for source_id, name in entries:
-                        dest_id = name_to_res.get(name)
-                        cache[(module, name)] = dest_id
-                        result[source_id] = dest_id
-                    # Ensure we cache negative lookups as well
-                    for source_id, name in entries:
-                        cache.setdefault((module, name), result.get(source_id))
+                    chunk_size = self.translation_batch_size or getattr(self, "batch_size", None) or len(entries)
+                    for chunk in self._iter_batches(entries, chunk_size):
+                        if not chunk:
+                            continue
+                        chunk_names = [name for _, name in chunk]
+                        record_ids = self._execute_with_retry(
+                            lambda module=module, chunk_names=chunk_names: model_data.search([
+                                ("module", "=", module),
+                                ("name", "in", chunk_names),
+                                ("model", "=", model_name),
+                            ]),
+                            context=f"ir.model.data search dest batch {model_name}",
+                        )
+                        records = self._execute_with_retry(
+                            lambda record_ids=record_ids: model_data.read(record_ids, ["module", "name", "res_id"]),
+                            context=f"ir.model.data read dest batch {model_name}",
+                        ) if record_ids else []
+                        name_to_res = {rec.get("name"): rec.get("res_id") for rec in records}
+                        for source_id, name in chunk:
+                            dest_id = name_to_res.get(name)
+                            cache[(module, name)] = dest_id
+                            result[source_id] = dest_id
+                        for source_id, name in chunk:
+                            cache.setdefault((module, name), result.get(source_id))
             else:
                 for module, entries in by_module.items():
                     for source_id, name in entries:

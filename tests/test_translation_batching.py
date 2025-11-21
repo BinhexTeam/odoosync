@@ -131,6 +131,33 @@ class TranslationBatchingTests(unittest.TestCase):
         self.assertEqual(reverse_model.trans.get(201), 1)
         self.assertEqual(reverse_model.trans.get(205), 5)
 
+    def test_lookup_dest_ids_uses_translation_batch_size(self):
+        records = []
+        for idx, source_id in enumerate(range(1, 6), start=1):
+            records.append({
+                'id': idx,
+                'module': '__export_sfit__',
+                'name': f'partner_{source_id}',
+                'model': 'res.partner',
+                'res_id': 1000 + source_id,
+            })
+        model_data = RecordingModelData(records)
+
+        syncer = self._build_syncer(translation_batch_size=2)
+        syncer.dest = types.SimpleNamespace(ir_model_obj=model_data)
+        syncer.models = []
+        syncer.models_by_name = {}
+        syncer.reverse_models = []
+        syncer.reverse_models_by_name = {}
+
+        xmlids = {source_id: f"__export_sfit__.partner_{source_id}" for source_id in range(1, 6)}
+        result = syncer._lookup_dest_ids_by_xmlid_bulk('res.partner', xmlids)
+
+        self.assertEqual(len(model_data.search_calls), 3)
+        self.assertEqual(len(model_data.read_calls), 3)
+        self.assertEqual(result[1], 1001)
+        self.assertEqual(result[5], 1005)
+
 
 if __name__ == '__main__':
     unittest.main()
