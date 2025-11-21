@@ -106,13 +106,18 @@ passing ``--sync-dependencies`` on the CLI or setting
 
   odoosync mysyncfile.yaml --netrc-file /etc/odoo/credentials.netrc --sync-dependencies
 
-Chunk sizes default to 1,000 records per request. Override them globally with
-``options.batch_size`` or override per-model limits by adding ``batch_size``
-under each model definition (set it to ``null`` to disable batching for that
-model only). Translation XMLID lookups have their own limit via
-``options.translation_batch_size`` (also defaulting to 1,000). Set that option
-to ``null`` or use ``options.disable_translation_batching`` when you want to
-fetch all translations in a single RPC call.
+Chunk sizes default to 1,000 records per request for reads/updates, while
+creation requests default to batches of 200 records. Override the general limit
+with ``options.batch_size`` or override per-model read limits by adding
+``batch_size`` under each model definition (set it to ``null`` to disable
+batching for that model only). Creation batches can be tuned independently via
+``options.create_batch_size`` (or per-model ``create_batch_size``) and disabled
+with ``options.disable_create_batching``.
+
+Translation XMLID lookups have their own limit via ``options.translation_batch_size``
+(also defaulting to 1,000). Set that option to ``null`` or use
+``options.disable_translation_batching`` when you want to fetch all translations
+in a single RPC call.
 
 Automatic reuse of records by XML ID is enabled by default. Set
 ``options.auto_xmlid_lookup`` to ``false`` in the YAML file if you prefer to

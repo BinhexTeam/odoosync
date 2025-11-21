@@ -213,6 +213,49 @@ class ModelSyncer:
         else:
             logger.debug("Translation batching disabled; XMLID lookups happen in a single request")
 
+        default_create_batch_size = 200
+        self._create_batch_size_defined = False
+        disable_create_batching = bool(self.options.get("disable_create_batching"))
+        create_batch_option = self.options.get("create_batch_size")
+        if disable_create_batching:
+            self.create_batch_size = None
+            self._create_batch_size_defined = True
+        elif create_batch_option is None:
+            if self.batch_size is not None:
+                self.create_batch_size = min(self.batch_size, default_create_batch_size)
+                self._create_batch_size_defined = True
+            else:
+                self.create_batch_size = None
+        else:
+            try:
+                parsed = int(create_batch_option)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid create batch size %r provided; falling back to default of %s",
+                    create_batch_option,
+                    default_create_batch_size,
+                )
+                parsed = default_create_batch_size
+            if parsed <= 0:
+                logger.warning(
+                    "Create batch size %s is non-positive; creating records in a single request",
+                    create_batch_option,
+                )
+                self.create_batch_size = None
+            else:
+                self.create_batch_size = parsed
+            self._create_batch_size_defined = True
+        if self._create_batch_size_defined:
+            if self.create_batch_size:
+                logger.debug("Using create batch size %s for record creation", self.create_batch_size)
+            else:
+                logger.debug("Create batching disabled; records created in a single request")
+        else:
+            logger.debug(
+                "Create batch size not set explicitly; following general batch size (%s)",
+                self.batch_size or "all",
+            )
+
     def _parse_record_id_mappings(
         self, struct: dict
     ) -> Tuple[Dict[str, Dict[int, int]], Dict[str, Dict[int, int]], Dict[str, Dict[str, str]]]:
@@ -775,6 +818,13 @@ class ModelSyncer:
             return getattr(model, "batch_size_override", None)
         return self.batch_size
 
+    def _get_effective_create_batch_size(self, model: Optional[OdooModel] = None) -> Optional[int]:
+        if model and getattr(model, "has_create_batch_size_override", False):
+            return getattr(model, "create_batch_size_override", None)
+        if getattr(self, "_create_batch_size_defined", False):
+            return getattr(self, "create_batch_size", None)
+        return self._get_effective_batch_size(model)
+
     def _lookup_source_xmlids_bulk(self, model_name: str, source_ids: List[int]) -> Dict[int, Optional[str]]:
         cache = self._source_xmlid_cache[model_name]
         result: Dict[int, Optional[str]] = {}
@@ -1028,6 +1078,7 @@ class ModelSyncer:
         model._dest_odoo = self.dest.odoo
         obj = odoo_instance.odoo.env[model.name]
         model_batch_size = self._get_effective_batch_size(model)
+        create_batch_size = self._get_effective_create_batch_size(model)
 
         total_records = len(model.records)
         if model_batch_size:
@@ -1037,11 +1088,12 @@ class ModelSyncer:
             batches = 1 if total_records else 0
             batch_descriptor = "all"
         logger.info(
-            "Sync plan for %s: %s records across %s batch(es) (batch_size=%s)",
+            "Sync plan for %s: %s records across %s batch(es) (read_batch=%s, create_batch=%s)",
             model.name,
             total_records,
             batches,
             batch_descriptor,
+            create_batch_size or "all",
         )
         progress = ProgressTracker(model.name, total_records)
 
@@ -1192,7 +1244,7 @@ class ModelSyncer:
             mapped = model._map_fields(record, find_dest_id_function)
             batch_sources.append(source_id)
             batch_payload.append(mapped)
-            if model_batch_size and len(batch_payload) >= model_batch_size:
+            if create_batch_size and len(batch_payload) >= create_batch_size:
                 created_sources.update(_flush_create_batch(batch_sources, batch_payload))
                 batch_payload = []
                 batch_sources = []

@@ -40,6 +40,12 @@ class OdooModel:
             if self.has_batch_size_override
             else None
         )
+        self.has_create_batch_size_override = "create_batch_size" in model_dict
+        self.create_batch_size_override = (
+            self._parse_batch_size_override(model_dict.get("create_batch_size"))
+            if self.has_create_batch_size_override
+            else None
+        )
         self.excluded_fields = set(model_dict.get("excluded_fields", [])).union(set(DEFAULT_EXCLUDED_FIELDS))
         self.included_fields = set(model_dict.get("included_fields", []))
         self.reverse = bool(model_dict.get("reverse"))

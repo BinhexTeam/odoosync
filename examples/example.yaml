@@ -38,12 +38,14 @@ options:
   # netrc_path: /etc/odoo/odoosync.netrc  # Optional: shared credentials file
   # sync_dependencies: true  # Optional: load related records referenced by relational fields
   # batch_size: 500  # Optional: override default 1000 chunking
+  # create_batch_size: 200  # Optional: cap record creation payloads (default min(batch_size, 200))
   # translation_batch_size: 750  # Optional: limit ir.model.data lookups per request (default 1000)
 
 models:
 
 - model: res.partner
   batch_size: 250  # Optional: override per-model chunk size (falls back to options.batch_size/default)
+  # create_batch_size: 100  # Optional: override record creation chunk size for this model
   domain: [['customer_rank', '>', 0], ['company_id', '=', 2]]
   field_mappings:
     x_field: y_field        # rename custom field when the destination uses y_field
