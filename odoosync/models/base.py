@@ -54,6 +54,7 @@ class OdooModel:
         self.indirect_mappings: Dict[str, dict] = {}
         self.field_mappings: Dict[str, str] = self._load_field_mappings(model_dict)
         self.value_mappings = self._normalize_value_mappings(model_dict.get("value_mappings"))
+        self.forced_field_values = self._parse_forced_field_values(model_dict.get("forced_values"))
         self.retry_on_create = self._parse_retry_on_create(model_dict.get("retry_on_create"))
         self.dependency_rel_fields: Dict[str, Dict[str, str]] = {}
         self._dependency_read_fields: Set[str] = set()
@@ -211,6 +212,18 @@ class OdooModel:
             logger.debug("Final indirect mappings for %s: %s", self.name or "<unknown>", self.indirect_mappings)
 
         return simple_mappings
+
+    def _parse_forced_field_values(self, raw_values) -> Dict[str, object]:
+        if not raw_values:
+            return {}
+        if not isinstance(raw_values, dict):
+            logger.warning(
+                "Ignoring forced_values for %s; expected a mapping but got %r.",
+                self.name or "<unknown>",
+                raw_values,
+            )
+            return {}
+        return dict(raw_values)
 
     def _parse_retry_on_create(self, config: Optional[dict]) -> Optional[dict]:
         if not config:
@@ -395,6 +408,18 @@ class OdooModel:
             if field_name not in seen:
                 read_fields.append(field_name)
                 seen.add(field_name)
+        if self.forced_field_values:
+            for dest_field in self.forced_field_values.keys():
+                if dest_field not in dest_field_names:
+                    logger.warning(
+                        "Forced value configured for %s[%s] but destination field is missing; skipping.",
+                        self.name or "<unknown>",
+                        dest_field,
+                    )
+                    continue
+                if dest_field not in self.dest_fields:
+                    self.dest_fields.append(dest_field)
+
         self.read_fields = read_fields
         logger.debug("Source fields: %s", self.fields)
         logger.debug("Destination fields: %s", self.dest_fields)
@@ -430,7 +455,15 @@ class OdooModel:
                     dest_field,
                     message,
                 )
-        return mapped
+        return self._apply_forced_field_values(mapped)
+
+    def _apply_forced_field_values(self, mapped: Dict[str, object]) -> Dict[str, object]:
+        if not getattr(self, "forced_field_values", None):
+            return mapped
+        adjusted = dict(mapped)
+        for dest_field, value in self.forced_field_values.items():
+            adjusted[dest_field] = value
+        return adjusted
 
     def _convert_field_value(self, source_field, dest_field, spec, value, find_dest_id_function):
         if spec is None:

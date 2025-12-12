@@ -178,6 +178,23 @@ map the field and attach a ``value_mappings`` block::
 This keeps legacy ``type`` values for other records untouched while marking
 only ``product`` entries as storable.
 
+When a field must always take a specific value on the destination (for example a
+many2one that should point to a fixed record, or a many2many that must include a
+curated tag set), add a ``forced_values`` block inside the model definition::
+
+  forced_values:
+    country_id: 21               # many2one: set destination id 21 no matter the source
+    tag_ids:
+      - [6, 0, [10, 11, 12]]     # many2many: use standard Odoo command format
+
+Entries in ``forced_values`` are merged into every payload after regular field
+mappings and value mappings run, meaning they override both the incoming source
+data and any computed defaults. They also work for fields that are not present
+in the source model: odoosync injects the specified values directly into the
+RPC request as long as the destination field exists. Provide the values exactly
+as Odoo expects them (IDs for many2one/selection/integer fields, command lists
+for x2many relations, etc.).
+
 If Odoo rejects record creation because of validation errors (for example an
 invalid VAT number), declare a ``retry_on_create`` strategy. odoosync will log
 the failure, drop the listed fields in every combination up to

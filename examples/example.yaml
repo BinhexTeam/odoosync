@@ -59,6 +59,10 @@ models:
       0: 0
       1: 10
       2: 20                  # scale customer rank on write
+  forced_values:
+    country_id: 21           # lock every record to destination country id 21
+    category_id:
+      - [6, 0, [10, 12]]     # assign specific categories without syncing them
   excluded_fields:
   - signup_url               # skip marketing signup URL
   context: {'active_test': False}

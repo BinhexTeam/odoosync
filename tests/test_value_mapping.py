@@ -141,6 +141,41 @@ class ValueMappingTests(unittest.TestCase):
         mapped = model._map_fields(data, lambda *args, **kwargs: None)
         self.assertEqual(mapped['comment'], 'Migrated from legacy system')
 
+    def test_forced_values_override_incoming_data(self):
+        model = OdooModel({
+            'model': 'res.partner',
+            'forced_values': {
+                'comment': 'Always set me',
+            },
+        })
+        model.fields = ['comment']
+        model.dest_fields = ['comment']
+        model.field_specs = {
+            'comment': {
+                'dest_field': 'comment',
+                'source_type': 'text',
+                'source_relation': None,
+                'dest_type': 'text',
+                'dest_relation': None,
+            }
+        }
+        data = {'comment': 'Original Note'}
+        mapped = model._map_fields(data, lambda *args, **kwargs: None)
+        self.assertEqual(mapped['comment'], 'Always set me')
+
+    def test_forced_values_applied_without_source_field(self):
+        model = OdooModel({
+            'model': 'product.template',
+            'forced_values': {
+                'available_in_pos': True,
+            },
+        })
+        model.fields = []
+        model.dest_fields = []
+        model.field_specs = {}
+        mapped = model._map_fields({}, lambda *args, **kwargs: None)
+        self.assertEqual(mapped['available_in_pos'], True)
+
 
 if __name__ == '__main__':
     unittest.main()
