@@ -1007,7 +1007,10 @@ class ModelSyncer:
             if key == "id":
                 continue
             if isinstance(value, (list, tuple)):
-                value = value[0]
+                if value:
+                    value = value[0]
+                else:
+                    value = "___None"
             if not value:
                 value = "___None"
             _hash.update(str(value).encode("utf-8"))

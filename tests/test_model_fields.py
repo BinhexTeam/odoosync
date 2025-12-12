@@ -45,6 +45,15 @@ class OdooModelFieldMappingTests(unittest.TestCase):
         self.assertEqual(ModelSyncer._make_hash(syncer, base),
                          ModelSyncer._make_hash(syncer, with_flag))
 
+    def test_make_hash_handles_empty_list_values(self):
+        payload = {'id': 1, 'category_ids': []}
+        syncer = ModelSyncer.__new__(ModelSyncer)
+        try:
+            hashed = ModelSyncer._make_hash(syncer, payload)
+        except Exception as exc:  # pragma: no cover - fail explicitly
+            self.fail(f"_make_hash raised unexpectedly: {exc}")
+        self.assertIsInstance(hashed, str)
+
 
 if __name__ == '__main__':
     unittest.main()
