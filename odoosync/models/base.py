@@ -845,6 +845,18 @@ class OdooModel:
         cache[source_id] = dest_id
         if dest_id:
             return ResolvedMany2OneValue(dest_model, dest_id)
+        missing_cache: Set[str] = lookup_config.setdefault("_missing_values_logged", set())
+        value_key = str(lookup_value)
+        if value_key not in missing_cache:
+            logger.warning(
+                "Lookup mapping for %s could not find %s.%s matching %r (domain=%s)",
+                source_field,
+                dest_model,
+                dest_field_name,
+                lookup_value,
+                dest_domain,
+            )
+            missing_cache.add(value_key)
         return None
 
     def _get_field_metadata(self, odoo, model_name: str, field_name: str, model_obj=None):
