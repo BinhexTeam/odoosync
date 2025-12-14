@@ -87,6 +87,13 @@ models:
       product: True
       service: False
       __default__: False
+    intrasat_id:
+      lookup:
+        source_model: report.intrastat.code
+        source_field: code
+        dest_model: hs.code
+        dest_field: code
+        # domain: [['company_id', '=', 2]]  # Optional: extra filters for the destination search
   excluded_fields:
   - message_ids
 

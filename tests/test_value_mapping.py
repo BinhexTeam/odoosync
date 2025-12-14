@@ -11,6 +11,37 @@ sys.modules.pop('odoosync.models', None)
 from odoosync.models import OdooModel
 
 
+class LookupReadModel:
+    def __init__(self, records):
+        self._records = dict(records)
+
+    def read(self, ids, fields):
+        return [self._records.get(record_id, {}) for record_id in ids]
+
+
+class LookupSearchModel:
+    def __init__(self, results):
+        self._results = list(results)
+
+    def search(self, domain, limit=None):
+        if limit:
+            return self._results[:limit]
+        return list(self._results)
+
+
+class MockEnv:
+    def __init__(self, models):
+        self._models = dict(models)
+
+    def __getitem__(self, model_name):
+        return self._models[model_name]
+
+
+class MockOdoo:
+    def __init__(self, models):
+        self.env = MockEnv(models)
+
+
 class ValueMappingTests(unittest.TestCase):
     def test_selection_value_mapping_applied(self):
         model = OdooModel({
@@ -175,6 +206,45 @@ class ValueMappingTests(unittest.TestCase):
         model.field_specs = {}
         mapped = model._map_fields({}, lambda *args, **kwargs: None)
         self.assertEqual(mapped['available_in_pos'], True)
+
+    def test_lookup_mapping_matches_cross_model_code(self):
+        model = OdooModel({
+            'model': 'product.template',
+            'field_mappings': {
+                'intrasat_id': 'hs_code_id',
+            },
+            'value_mappings': {
+                'intrasat_id': {
+                    'lookup': {
+                        'source_model': 'report.intrastat.code',
+                        'source_field': 'code',
+                        'dest_model': 'hs.code',
+                        'dest_field': 'code',
+                    },
+                },
+            },
+        })
+        model.fields = ['intrasat_id']
+        model.dest_fields = ['hs_code_id']
+        model.field_specs = {
+            'intrasat_id': {
+                'dest_field': 'hs_code_id',
+                'source_type': 'many2one',
+                'source_relation': 'report.intrastat.code',
+                'dest_type': 'many2one',
+                'dest_relation': 'hs.code',
+            },
+        }
+        model._source_odoo = MockOdoo({
+            'report.intrastat.code': LookupReadModel({123: {'code': '95030010'}}),
+        })
+        model._dest_odoo = MockOdoo({
+            'hs.code': LookupSearchModel([456]),
+        })
+
+        data = {'intrasat_id': [123, 'Old Code']}
+        mapped = model._map_fields(data, lambda *args, **kwargs: None)
+        self.assertEqual(mapped['hs_code_id'], 456)
 
 
 if __name__ == '__main__':

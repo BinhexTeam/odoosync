@@ -178,6 +178,27 @@ map the field and attach a ``value_mappings`` block::
 This keeps legacy ``type`` values for other records untouched while marking
 only ``product`` entries as storable.
 
+When you need to translate a many2one field between models that no longer
+share IDs (for example Odoo 11 ``intrasat_id`` to Odoo 14 ``hs_code_id``), add
+a ``lookup`` definition under ``value_mappings``. odoosync will read the source
+relation, extract the selected field, and search the target model for a match
+instead of requiring you to sync the auxiliary model or maintain giant manual
+ID maps::
+
+  field_mappings:
+    intrasat_id: hs_code_id
+  value_mappings:
+    intrasat_id:
+      lookup:
+        source_model: report.intrastat.code
+        source_field: code
+        dest_model: hs.code
+        dest_field: code
+
+Optional ``domain`` and ``limit`` keys further constrain the destination
+search, while the result is cached per source record so repeated references do
+not trigger extra RPC calls.
+
 When a field must always take a specific value on the destination (for example a
 many2one that should point to a fixed record, or a many2many that must include a
 curated tag set), add a ``forced_values`` block inside the model definition::

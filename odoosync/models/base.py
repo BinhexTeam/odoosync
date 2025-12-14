@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ..core import get_logger
@@ -17,6 +18,12 @@ DEFAULT_EXCLUDED_FIELDS: List[str] = [
     "write_date",
     "write_uid",
 ]
+
+
+@dataclass(frozen=True)
+class ResolvedMany2OneValue:
+    model_name: Optional[str]
+    dest_id: int
 
 
 class OdooModel:
@@ -438,7 +445,7 @@ class OdooModel:
             dest_field = spec.get("dest_field") if spec else source_field
             value = data.get(source_field)
 
-            preprocessed_value = self._apply_value_mapping(source_field, value)
+            preprocessed_value = self._apply_value_mapping(source_field, value, spec)
             converted, ok, message = self._convert_field_value(
                 source_field, dest_field, spec, preprocessed_value, find_dest_id_function
             )
@@ -473,6 +480,25 @@ class OdooModel:
         dest_type = spec.get("dest_type")
         source_relation = spec.get("source_relation")
         dest_relation = spec.get("dest_relation")
+
+        if isinstance(value, ResolvedMany2OneValue):
+            if dest_type != "many2one":
+                logger.warning(
+                    "Lookup mapping for %s resolved to many2one value but destination field %s is %s",
+                    source_field,
+                    dest_field,
+                    dest_type,
+                )
+                return value.dest_id, True, None
+            expected_model = dest_relation or source_relation or value.model_name
+            if expected_model and value.model_name and expected_model != value.model_name:
+                logger.debug(
+                    "Lookup mapping returned %s for %s but destination expects %s",
+                    value.model_name,
+                    source_field,
+                    expected_model,
+                )
+            return value.dest_id, True, None
 
         if value in (None, False):
             return None, True, None
@@ -611,11 +637,80 @@ class OdooModel:
                     "default": default,
                     "case_insensitive": case_insensitive,
                 }
+                lookup_cfg = self._parse_lookup_mapping(field_name, config.get("lookup") or config.get("__lookup__"))
+                if lookup_cfg:
+                    normalized[field_name]["lookup"] = lookup_cfg
             else:
                 normalized[field_name] = {"constant": config}
         return normalized
 
-    def _apply_value_mapping(self, source_field: str, value):
+    def _parse_lookup_mapping(self, field_name: str, raw_lookup) -> Optional[dict]:
+        if raw_lookup in (None, False):
+            return None
+        if not isinstance(raw_lookup, dict):
+            logger.warning(
+                "Ignoring lookup mapping for %s; expected a mapping but got %r",
+                field_name,
+                raw_lookup,
+            )
+            return None
+
+        normalized: Dict[str, object] = {}
+        normalized["source_model"] = (
+            raw_lookup.get("source_model")
+            or raw_lookup.get("from_model")
+            or raw_lookup.get("source_relation")
+        )
+        normalized["source_field"] = raw_lookup.get("source_field") or raw_lookup.get("lookup_field")
+        normalized["dest_model"] = (
+            raw_lookup.get("dest_model")
+            or raw_lookup.get("target_model")
+            or raw_lookup.get("destination_model")
+        )
+        normalized["dest_field"] = raw_lookup.get("dest_field") or raw_lookup.get("target_field")
+        normalized["operator"] = raw_lookup.get("operator") or raw_lookup.get("dest_operator") or "="
+
+        dest_domain_raw = raw_lookup.get("domain") or raw_lookup.get("dest_domain") or []
+        domain_clauses: List[Tuple] = []
+        if isinstance(dest_domain_raw, (list, tuple)):
+            for clause in dest_domain_raw:
+                if isinstance(clause, (list, tuple)) and len(clause) == 3:
+                    domain_clauses.append(tuple(clause))
+                else:
+                    logger.warning(
+                        "Skipping invalid lookup domain clause for %s: %r",
+                        field_name,
+                        clause,
+                    )
+        elif dest_domain_raw:
+            logger.warning(
+                "Ignoring lookup domain for %s; expected a list of triples but got %r",
+                field_name,
+                dest_domain_raw,
+            )
+        normalized["domain"] = domain_clauses
+
+        limit_value = raw_lookup.get("limit")
+        if limit_value is not None:
+            try:
+                limit_int = int(limit_value)
+                if limit_int <= 0:
+                    raise ValueError
+                normalized["limit"] = limit_int
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid lookup limit %r for %s; ignoring",
+                    limit_value,
+                    field_name,
+                )
+                normalized["limit"] = None
+        else:
+            normalized["limit"] = None
+
+        normalized["_cache"] = {}
+        return normalized
+
+    def _apply_value_mapping(self, source_field: str, value, field_spec: Optional[dict] = None):
         mapping_config = self.value_mappings.get(source_field)
         if not mapping_config:
             return value
@@ -650,11 +745,107 @@ class OdooModel:
             except TypeError:
                 continue
 
+        lookup_config = mapping_config.get("lookup")
+        if lookup_config:
+            resolved = self._apply_lookup_mapping(source_field, value, lookup_config, field_spec)
+            if isinstance(resolved, ResolvedMany2OneValue):
+                return resolved
+
         default_value = mapping_config.get("default", _VALUE_MAPPING_UNSET)
         if default_value is not _VALUE_MAPPING_UNSET:
             return default_value
 
         return value
+
+    def _apply_lookup_mapping(self, source_field: str, raw_value, lookup_config: dict, field_spec: Optional[dict]):
+        if raw_value in (None, False):
+            return None
+
+        source_id = self._extract_many2one_id(raw_value)
+        if not source_id:
+            return None
+
+        cache: Dict[int, Optional[int]] = lookup_config.setdefault("_cache", {})
+        effective_dest_model = lookup_config.get("dest_model") or (field_spec and field_spec.get("dest_relation"))
+        if source_id in cache:
+            cached_id = cache[source_id]
+            if cached_id:
+                return ResolvedMany2OneValue(effective_dest_model, cached_id)
+            return None
+
+        source_model = lookup_config.get("source_model") or (field_spec and field_spec.get("source_relation"))
+        dest_model = effective_dest_model
+        source_field_name = lookup_config.get("source_field")
+        dest_field_name = lookup_config.get("dest_field")
+
+        if not source_model or not source_field_name or not dest_model or not dest_field_name:
+            if not lookup_config.get("_missing_config_logged"):
+                logger.warning(
+                    "Lookup mapping for %s requires source_model/source_field and dest_model/dest_field",
+                    source_field,
+                )
+                lookup_config["_missing_config_logged"] = True
+            cache[source_id] = None
+            return None
+
+        source_odoo = getattr(self, "_source_odoo", None)
+        dest_odoo = getattr(self, "_dest_odoo", None)
+        if not source_odoo or not dest_odoo:
+            logger.debug("Lookup mapping for %s skipped because Odoo environments are not available", source_field)
+            return None
+
+        try:
+            source_obj = source_odoo.env[source_model]
+            source_records = source_obj.read([source_id], [source_field_name])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Lookup read failed for %s[%s].%s: %s",
+                source_model,
+                source_id,
+                source_field_name,
+                exc,
+            )
+            cache[source_id] = None
+            return None
+
+        if not source_records:
+            cache[source_id] = None
+            return None
+
+        lookup_value = source_records[0].get(source_field_name)
+        if isinstance(lookup_value, (list, tuple)) and lookup_value:
+            lookup_value = lookup_value[0]
+        elif isinstance(lookup_value, dict) and "id" in lookup_value:
+            lookup_value = lookup_value.get("id")
+
+        if lookup_value in (None, ""):
+            cache[source_id] = None
+            return None
+
+        dest_domain: List[Tuple] = list(lookup_config.get("domain", []))
+        operator = lookup_config.get("operator") or "="
+        limit = lookup_config.get("limit") or 1
+        dest_domain.append((dest_field_name, operator, lookup_value))
+
+        try:
+            dest_obj = dest_odoo.env[dest_model]
+            dest_ids = dest_obj.search(dest_domain, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Lookup search failed for %s.%s with value %r: %s",
+                dest_model,
+                dest_field_name,
+                lookup_value,
+                exc,
+            )
+            cache[source_id] = None
+            return None
+
+        dest_id = dest_ids[0] if dest_ids else None
+        cache[source_id] = dest_id
+        if dest_id:
+            return ResolvedMany2OneValue(dest_model, dest_id)
+        return None
 
     def _get_field_metadata(self, odoo, model_name: str, field_name: str, model_obj=None):
         cache_key = (model_name, field_name)
@@ -903,4 +1094,9 @@ class OdooModel:
             return None
 
 
-__all__ = ["OdooModel", "INTERNAL_RUNTIME_FIELDS", "DEFAULT_EXCLUDED_FIELDS"]
+__all__ = [
+    "OdooModel",
+    "INTERNAL_RUNTIME_FIELDS",
+    "DEFAULT_EXCLUDED_FIELDS",
+    "ResolvedMany2OneValue",
+]
